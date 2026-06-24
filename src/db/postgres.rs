@@ -2,55 +2,65 @@ use super::traits::{Database, DbError, QueryResult};
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tokio_postgres::{NoTls, SimpleQueryMessage};
-use std::sync::Arc;
 use tracing::{debug, error, info};
 
-// Write operations blocked regardless of session-level READ ONLY setting (defense-in-depth)
 const BLOCKED_KEYWORDS: &[&str] = &[
     "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE",
     "GRANT", "REVOKE", "EXECUTE", "EXEC", "CALL", "COPY",
     "VACUUM", "CLUSTER", "REINDEX", "REFRESH", "IMPORT",
 ];
 
-// DO is a PL/pgSQL block executor — blocked always
-// ANALYZE is special: blocked standalone but allowed inside EXPLAIN ANALYZE
-
 pub struct PostgresDb {
-    client: Arc<Mutex<tokio_postgres::Client>>,
+    name: String,
+    url: String,
+    no_tls: bool,
+    // None = not yet connected (or connection was dropped)
+    client: Mutex<Option<tokio_postgres::Client>>,
 }
 
 impl PostgresDb {
-    pub async fn connect(database_url: &str, no_tls: bool) -> Result<Self, DbError> {
-        info!("Connecting to PostgreSQL...");
+    /// Create a new (not-yet-connected) PostgresDb. Connection happens lazily on first query.
+    pub fn new(name: impl Into<String>, url: impl Into<String>, no_tls: bool) -> Self {
+        Self {
+            name: name.into(),
+            url: url.into(),
+            no_tls,
+            client: Mutex::new(None),
+        }
+    }
 
-        let config: tokio_postgres::Config = database_url
-            .parse()
-            .map_err(|e| DbError::ConnectionFailed(format!("Invalid URL: {}", e)))?;
+    async fn ensure_connected(
+        guard: &mut tokio::sync::MutexGuard<'_, Option<tokio_postgres::Client>>,
+        name: &str,
+        url: &str,
+        no_tls: bool,
+    ) -> Result<(), DbError> {
+        if guard.is_some() {
+            return Ok(());
+        }
 
+        info!("Connecting to '{}'...", name);
         let client = if no_tls {
-            connect_plain(&config).await?
+            connect_plain(url).await?
         } else {
             #[cfg(feature = "tls")]
             {
-                connect_tls(&config).await?
+                connect_tls(url).await?
             }
             #[cfg(not(feature = "tls"))]
             {
-                connect_plain(&config).await?
+                connect_plain(url).await?
             }
         };
 
-        // Primary read-only enforcement at session level
         client
             .simple_query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
             .await
-            .map_err(|e| DbError::ConnectionFailed(format!("Failed to set READ ONLY: {}", e)))?;
+            .map_err(|e| DbError::ConnectionFailed(format!("'{}': failed to set READ ONLY: {}", name, e)))?;
 
-        info!("Connected. Session enforced as READ ONLY.");
-
-        Ok(Self {
-            client: Arc::new(Mutex::new(client)),
-        })
+        info!("'{}' connected (READ ONLY).", name);
+        **guard = Some(client);
+        Ok(())
     }
 
     fn check_blocked(sql: &str) -> Result<(), DbError> {
@@ -61,21 +71,18 @@ impl PostgresDb {
             }
 
             let first_word = upper.split_whitespace().next().unwrap_or("");
-            let starts_with_explain = first_word == "EXPLAIN";
+            let is_explain = first_word == "EXPLAIN";
 
-            // DO is always blocked (PL/pgSQL executor)
-            if !starts_with_explain && keyword_found(&upper, "DO") {
+            if !is_explain && keyword_found(&upper, "DO") {
                 return Err(DbError::BlockedKeyword { keyword: "DO".to_string() });
             }
-
             for &kw in BLOCKED_KEYWORDS {
                 if keyword_found(&upper, kw) {
                     return Err(DbError::BlockedKeyword { keyword: kw.to_string() });
                 }
             }
-
-            // ANALYZE blocked standalone; EXPLAIN ANALYZE is fine
-            if !starts_with_explain && keyword_found(&upper, "ANALYZE") {
+            // ANALYZE standalone is blocked; EXPLAIN ANALYZE is fine
+            if !is_explain && keyword_found(&upper, "ANALYZE") {
                 return Err(DbError::BlockedKeyword { keyword: "ANALYZE".to_string() });
             }
         }
@@ -83,42 +90,42 @@ impl PostgresDb {
     }
 }
 
-async fn connect_plain(config: &tokio_postgres::Config) -> Result<tokio_postgres::Client, DbError> {
+async fn connect_plain(url: &str) -> Result<tokio_postgres::Client, DbError> {
+    let config: tokio_postgres::Config = url
+        .parse()
+        .map_err(|e| DbError::ConnectionFailed(format!("Invalid URL: {}", e)))?;
     let (client, connection) = config
         .connect(NoTls)
         .await
         .map_err(|e| DbError::ConnectionFailed(e.to_string()))?;
-
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            error!("PostgreSQL connection dropped: {}", e);
+            error!("Connection dropped: {}", e);
         }
     });
-
     Ok(client)
 }
 
 #[cfg(feature = "tls")]
-async fn connect_tls(config: &tokio_postgres::Config) -> Result<tokio_postgres::Client, DbError> {
+async fn connect_tls(url: &str) -> Result<tokio_postgres::Client, DbError> {
+    let config: tokio_postgres::Config = url
+        .parse()
+        .map_err(|e| DbError::ConnectionFailed(format!("Invalid URL: {}", e)))?;
     let connector = native_tls::TlsConnector::new()
-        .map_err(|e| DbError::ConnectionFailed(format!("TLS init failed: {}", e)))?;
+        .map_err(|e| DbError::ConnectionFailed(format!("TLS init: {}", e)))?;
     let tls = postgres_native_tls::MakeTlsConnector::new(connector);
-
     let (client, connection) = config
         .connect(tls)
         .await
         .map_err(|e| DbError::ConnectionFailed(e.to_string()))?;
-
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            error!("PostgreSQL connection dropped: {}", e);
+            error!("Connection dropped: {}", e);
         }
     });
-
     Ok(client)
 }
 
-// Word-boundary check: keyword must not be flanked by identifier chars
 fn keyword_found(haystack: &str, keyword: &str) -> bool {
     let mut start = 0;
     while let Some(pos) = haystack[start..].find(keyword) {
@@ -143,13 +150,25 @@ impl Database for PostgresDb {
     async fn execute_query(&self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
         Self::check_blocked(sql)?;
 
-        debug!("Executing: {}", sql.trim());
+        debug!("[{}] {}", self.name, sql.trim());
 
-        let client = self.client.lock().await;
-        let messages = client
-            .simple_query(sql)
-            .await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let mut guard = self.client.lock().await;
+        Self::ensure_connected(&mut guard, &self.name, &self.url, self.no_tls).await?;
+
+        let client = guard.as_ref().unwrap();
+        let messages = match client.simple_query(sql).await {
+            Ok(m) => m,
+            Err(e) => {
+                // Mark connection as dead so the next call reconnects
+                if e.is_closed() {
+                    *guard = None;
+                    return Err(DbError::QueryFailed(
+                        format!("Connection lost (will reconnect on next query): {}", e)
+                    ));
+                }
+                return Err(DbError::QueryFailed(e.to_string()));
+            }
+        };
 
         let mut columns: Vec<String> = Vec::new();
         let mut rows: Vec<Vec<Option<String>>> = Vec::new();
@@ -179,12 +198,6 @@ impl Database for PostgresDb {
         }
 
         let row_count = rows.len();
-        Ok(QueryResult {
-            columns,
-            rows,
-            row_count,
-            truncated,
-            command_tag,
-        })
+        Ok(QueryResult { columns, rows, row_count, truncated, command_tag })
     }
 }

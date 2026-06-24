@@ -1,0 +1,20 @@
+# mcp-db-readonly database config
+# Copy to databases.toml and fill in your connection details.
+# databases.toml is gitignored — never commit real credentials.
+#
+# URL placeholders: use ${ENV_VAR} to pull passwords from the environment.
+
+[[database]]
+name = "local"
+url = "postgres://postgres@localhost:5432/mydb"
+no_tls = true
+
+[[database]]
+name = "staging"
+url = "postgres://app_user:${STAGING_DB_PASSWORD}@staging-db.internal:5432/app"
+no_tls = false
+
+[[database]]
+name = "prod"
+url = "postgres://readonly_user:${PROD_DB_PASSWORD}@prod-db.internal:5432/app"
+no_tls = false
