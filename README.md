@@ -36,7 +36,7 @@ The read-only enforcement is **in the server**, not in the AI model's judgment. 
 ### From source
 
 ```bash
-git clone https://github.com/singhard/mcp-db-readonly
+git clone https://github.com/Harkirat155/mcp-db-readonly
 cd mcp-db-readonly
 cargo build --release
 # Binary: target/release/mcp-db-readonly
