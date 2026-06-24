@@ -1,86 +1,133 @@
 # mcp-db-readonly
 
-An MCP (Model Context Protocol) server that gives AI assistants **read-only** SQL access to your database — with enforcement baked into the server itself, not left to the AI's discretion.
+An MCP (Model Context Protocol) server that gives AI assistants **read-only** access to your databases — with enforcement baked into the server, not left to the AI's discretion.
+
+Supports **PostgreSQL** and **MongoDB**.
 
 ## Why
 
-When you let an AI assistant query your database, you want a hard guarantee that it cannot modify anything, regardless of what prompt it receives. This server provides two independent layers of enforcement:
+When you let an AI assistant query a database, you want a hard guarantee that it cannot modify anything, regardless of what prompt it receives. This server provides multiple independent enforcement layers per database type:
 
-1. **Session-level**: Connects with `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` — PostgreSQL itself will reject any write attempt.
-2. **Keyword blocklist**: Blocks known write operations (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `CREATE`, etc.) before the query even reaches the database, with a clear error message.
+**PostgreSQL:**
+1. **Transaction-level** — every query runs inside `BEGIN TRANSACTION READ ONLY … ROLLBACK`. PostgreSQL blocks `SET TRANSACTION READ WRITE` escalation inside a read-only transaction.
+2. **Session-level** — the connection opens with `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` as a second layer.
+3. **Keyword blocklist** — common write operations and transaction-state keywords are rejected before the query reaches the database.
+4. **Single-statement enforcement** — interior `;` chains are rejected, preventing `SET …; INSERT …` patterns.
+
+**MongoDB:**
+1. **Operation whitelist** — only `find`, `aggregate`, `distinct`, `count`, `list_collections`, and `list_indexes` are accepted.
+2. **Pipeline stage blocking** — `$out` and `$merge` stages (the MongoDB equivalent of a write) are blocked in every aggregation pipeline before execution.
+
+The read-only enforcement is **in the server**, not in the AI model's judgment. No prompt can override it.
 
 ## Features
 
-- **Enforced read-only** — two independent layers, not policy
-- **PostgreSQL support** out of the box
-- **Extensible** — `Database` trait makes adding MySQL, SQLite, etc. straightforward
-- **TLS support** — `native-tls` by default for remote connections
-- **ASCII table output** — clean, AI-readable query results
-- **Configurable row limit** — default 500, user-adjustable up to 5000
-- **Zero trust** — logs to stderr, stdout is pure MCP protocol
+- **Enforced read-only** — multiple independent layers, not a "please be careful" policy
+- **PostgreSQL + MongoDB** — both database types supported in one server
+- **Multi-database** — connect to several named databases from a single TOML config; the AI picks by name
+- **Environment-variable interpolation** — `${ENV_VAR}` in connection strings; credentials never need to be in the file
+- **Configurable row limit** — default 500 rows, adjustable up to 5000
+- **ASCII table output** (SQL) and Extended JSON output (MongoDB) — clean, AI-readable results
+- **TLS support** — `native-tls` for PostgreSQL remote connections (MongoDB uses its own TLS stack)
+- **Extensible** — `Database` and `MongoDatabase` traits make adding new backends straightforward
 
 ## Installation
 
 ### From source
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/mcp-db-readonly
+git clone https://github.com/singhard/mcp-db-readonly
 cd mcp-db-readonly
 cargo build --release
-# Binary at: target/release/mcp-db-readonly
+# Binary: target/release/mcp-db-readonly
 ```
 
-### Local dev (no TLS)
+### PostgreSQL without TLS (local dev only)
+
+`--no-default-features` disables the `native-tls` dependency for PostgreSQL connections. It does **not** affect MongoDB TLS, which uses a separate stack.
 
 ```bash
 cargo build --no-default-features --release
 ```
 
-## Usage
+## Configuration
 
-```
-mcp-db-readonly --database-url <URL> [OPTIONS]
-
-Options:
-  --database-url <URL>    PostgreSQL connection URL [env: DATABASE_URL]
-  --max-rows <N>          Default max rows per query [default: 500] [env: MCP_MAX_ROWS]
-  --no-tls                Disable TLS (for local connections)
-  -h, --help              Print help
-  -V, --version           Print version
-```
-
-### Examples
+Copy the example and fill in your connection details:
 
 ```bash
-# Local dev database
+cp databases.toml.example databases.toml   # gitignored — never committed
+```
+
+### PostgreSQL
+
+```toml
+[[database]]
+name    = "local"
+url     = "postgres://postgres@localhost:5432/mydb"
+no_tls  = true
+
+[[database]]
+name    = "staging"
+url     = "postgres://app_user:${STAGING_DB_PASSWORD}@staging-db.example.com:5432/app"
+no_tls  = false
+
+[[database]]
+name    = "prod"
+url     = "postgres://readonly_user:${PROD_DB_PASSWORD}@prod-db.example.com:5432/app"
+no_tls  = false
+```
+
+### MongoDB
+
+```toml
+[[mongo]]
+name = "mydb"
+uri  = "mongodb://user:${MONGO_PASSWORD}@mongo.example.com:27017/mydb?authSource=admin"
+```
+
+The URI must include the database name in the path (`/mydb`). The server extracts it at startup. Replica set URIs (`host1:port,host2:port`) are also supported.
+
+`${ENV_VAR}` placeholders are resolved at startup from the process environment — keep passwords out of the file.
+
+### Starting the server
+
+```bash
+STAGING_DB_PASSWORD=secret MONGO_PASSWORD=secret2 \
+  mcp-db-readonly --config databases.toml
+```
+
+### Single-database shorthand (PostgreSQL only)
+
+```bash
+# Local dev
 mcp-db-readonly --database-url "postgres://user:pass@localhost:5432/mydb" --no-tls
 
-# Remote database with TLS (default)
-mcp-db-readonly --database-url "postgres://user:pass@db.example.com:5432/mydb"
-
-# Via environment variable
-DATABASE_URL=postgres://user:pass@localhost/mydb mcp-db-readonly --no-tls
+# Remote with TLS
+DATABASE_URL=postgres://user:pass@db.example.com:5432/mydb mcp-db-readonly
 ```
+
+### CLI reference
+
+```
+mcp-db-readonly [OPTIONS]
+
+Options:
+  --config <PATH>           TOML config file listing named databases
+  --database-url <URL>      Single PostgreSQL URL [env: DATABASE_URL]
+  --database-name <NAME>    Name for --database-url connection [default: default]
+  --no-tls                  Disable native-tls for PostgreSQL connections
+  --max-rows <N>            Default max rows per query [default: 500] [env: MCP_MAX_ROWS]
+  -h, --help                Print help
+  -V, --version             Print version
+```
+
+`--config` and `--database-url` are mutually exclusive.
 
 ## Integrate with Claude Code
 
-Add to your `.claude/settings.json` (or `~/.claude/settings.json` for all projects):
+Add to `~/.claude/mcp.json` (or the Claude Desktop / Cursor equivalent):
 
-```json
-{
-  "mcpServers": {
-    "db-readonly": {
-      "command": "/path/to/mcp-db-readonly",
-      "args": ["--database-url", "postgres://user:pass@localhost:5432/mydb", "--no-tls"],
-      "env": {
-        "RUST_LOG": "warn"
-      }
-    }
-  }
-}
-```
-
-Or using environment variables (recommended — keeps credentials out of config):
+### Single PostgreSQL database
 
 ```json
 {
@@ -89,67 +136,130 @@ Or using environment variables (recommended — keeps credentials out of config)
       "command": "/path/to/mcp-db-readonly",
       "env": {
         "DATABASE_URL": "postgres://user:pass@localhost:5432/mydb",
-        "MCP_MAX_ROWS": "500"
+        "RUST_LOG": "warn"
+      },
+      "args": ["--no-tls"]
+    }
+  }
+}
+```
+
+### Multiple databases (PostgreSQL + MongoDB)
+
+```json
+{
+  "mcpServers": {
+    "db-readonly": {
+      "command": "/path/to/mcp-db-readonly",
+      "args": ["--config", "/path/to/databases.toml"],
+      "env": {
+        "STAGING_DB_PASSWORD": "...",
+        "MONGO_PASSWORD": "...",
+        "RUST_LOG": "warn"
       }
     }
   }
 }
 ```
 
-Once configured, Claude will have access to a `sql_query` tool and can explore your schema and data.
+Once configured, the AI will have access to the `sql_query` and `mongo_query` tools and can explore schema and data across all configured databases.
 
-## The `sql_query` tool
+## Tool reference
+
+### `sql_query` (PostgreSQL)
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `statement` | string | yes | The SQL statement to execute |
-| `max_rows` | integer | no | Max rows (1–5000, default: server default) |
+| `database` | string | yes (multi-DB) | Name matching a `[[database]]` entry in the config |
+| `statement` | string | yes | SQL statement to execute (one statement; no `;` chains) |
+| `max_rows` | integer | no | Max rows returned (1–5000; default: server default) |
 
-**Allowed statements**: `SELECT`, `EXPLAIN`, `EXPLAIN ANALYZE`, `SHOW`, `WITH ... SELECT`, and other read-only operations.
+**Allowed**: `SELECT`, `EXPLAIN`, `EXPLAIN ANALYZE`, `SHOW`, `WITH … SELECT`, and other read-only operations.
 
-**Blocked statements**: `INSERT`, `UPDATE`, `DELETE`, `DROP`, `CREATE`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`, `COPY`, `VACUUM`, `ANALYZE` (standalone), `CALL`, `DO`, `EXEC`, `CLUSTER`, `REINDEX`, `REFRESH`, `IMPORT`.
+**Blocked keywords**: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `DROP`, `CREATE`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`, `COPY`, `VACUUM`, `ANALYZE` (standalone), `CALL`, `DO`, `EXEC`, `CLUSTER`, `REINDEX`, `REFRESH`, `IMPORT`, `SET`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`.
 
-### Example query results
+**Example output:**
 
 ```
-+----+----------+------------------+
-| id | username | email            |
-+----+----------+------------------+
-| 1  | alice    | alice@example.com|
-| 2  | bob      | bob@example.com  |
-+----+----------+------------------+
++----+----------+-------------------+
+| id | username | email             |
++----+----------+-------------------+
+| 1  | alice    | alice@example.com |
+| 2  | bob      | bob@example.com   |
++----+----------+-------------------+
 2 row(s)
 ```
 
+---
+
+### `mongo_query` (MongoDB)
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `database` | string | yes | Name matching a `[[mongo]]` entry in the config |
+| `operation` | string | yes | One of: `find`, `aggregate`, `distinct`, `count`, `list_collections`, `list_indexes` |
+| `collection` | string | required for most ops | Target collection (not required for `list_collections`) |
+| `filter` | string | no | JSON filter document, e.g. `{"status": "active"}` |
+| `projection` | string | no | JSON projection document, e.g. `{"name": 1, "_id": 0}` |
+| `sort` | string | no | JSON sort document, e.g. `{"createdAt": -1}` |
+| `pipeline` | string | no | JSON array of aggregation stages (required for `aggregate`) |
+| `field` | string | no | Field name (required for `distinct`) |
+| `limit` | integer | no | Max documents returned (1–1000; default: 100) |
+
+**Allowed operations:**
+
+| Operation | What it does |
+|-----------|-------------|
+| `find` | Query documents with optional filter, projection, sort, limit |
+| `aggregate` | Run an aggregation pipeline (`$out` and `$merge` stages are blocked) |
+| `distinct` | Return distinct values for a field |
+| `count` | Count documents matching an optional filter |
+| `list_collections` | List all collection names in the database |
+| `list_indexes` | List indexes for a collection |
+
+**Blocked pipeline stages**: `$out`, `$merge` (both write to collections).
+
+**Example output:**
+
+```
+[1] {"_id": {"$oid": "64a1f2..."}, "name": "Alice", "status": "active"}
+[2] {"_id": {"$oid": "64a1f3..."}, "name": "Bob", "status": "active"}
+2 document(s)
+```
+
+Documents are serialized as MongoDB Extended JSON (`{"$oid": "..."}` for ObjectIds, `{"$date": ...}` for dates, etc.).
+
+## Security model
+
+| Threat | PostgreSQL mitigation | MongoDB mitigation |
+|--------|----------------------|-------------------|
+| Prompt injection write attempt | Keyword blocklist rejects before DB; `BEGIN TRANSACTION READ ONLY` rejects at DB | Operation whitelist: only read operations accepted |
+| `SET TRANSACTION READ WRITE` escalation | Blocked by `SET` keyword; PostgreSQL also blocks it inside a read-only transaction | N/A |
+| Aggregation pipeline writing to a collection | N/A | `$out` and `$merge` stages are detected and blocked before execution |
+| Statement chaining (`SET …; INSERT …`) | Single-statement enforcement: interior `;` is rejected | N/A |
+| Credential exposure | `${ENV_VAR}` interpolation; `databases.toml` is gitignored | Same |
+| Excessive data exposure | Row limit (default 500, max 5000) | Document limit (default 100, max 1000) |
+
 ## Extending to other databases
 
-The `Database` trait in `src/db/traits.rs` is the extension point:
+Two traits in `src/db/traits.rs` are the extension points:
 
 ```rust
+// For SQL databases
 #[async_trait]
 pub trait Database: Send + Sync {
     async fn execute_query(&self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError>;
 }
+
+// For MongoDB-style document databases
+#[async_trait]
+pub trait MongoDatabase: Send + Sync {
+    async fn execute_mongo(&self, query: MongoQuery) -> Result<MongoResult, DbError>;
+}
 ```
 
-To add MySQL or SQLite:
-1. Add the driver crate to `Cargo.toml` (optionally behind a feature flag)
-2. Create `src/db/mysql.rs` or `src/db/sqlite.rs` implementing `Database`
-3. Add a `--driver` CLI flag in `main.rs` to select the backend
-
-The blocklist in `postgres.rs` is backend-specific and should be adapted for each driver's SQL dialect.
-
-## Security model
-
-| Threat | Mitigation |
-|--------|-----------|
-| Prompt injection attempts write operations | Session-level READ ONLY + keyword blocklist both reject it |
-| Blocklist bypass via obfuscation | Session-level READ ONLY catches anything that slips through |
-| Credentials in config | Use environment variables (`DATABASE_URL`) instead of inline args |
-| Excessive data exposure | Row limit (default 500); use LIMIT in queries for large tables |
-
-The read-only enforcement is **in the server**, not in the AI model's judgment. No prompt can override it.
+To add a new backend, implement the appropriate trait (see `src/db/postgres.rs` or `src/db/mongo.rs` for reference), wire a new config section in `src/config.rs` and `src/main.rs`, and expose the tool in `src/server.rs`.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

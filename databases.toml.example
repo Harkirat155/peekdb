@@ -2,19 +2,33 @@
 # Copy to databases.toml and fill in your connection details.
 # databases.toml is gitignored — never commit real credentials.
 #
-# URL placeholders: use ${ENV_VAR} to pull passwords from the environment.
+# Passwords: use ${ENV_VAR} to pull values from the environment.
+
+# ── PostgreSQL databases ───────────────────────────────────────────────────────
 
 [[database]]
-name = "local"
-url = "postgres://postgres@localhost:5432/mydb"
+name   = "local"
+url    = "postgres://postgres@localhost:5432/mydb"
 no_tls = true
 
 [[database]]
-name = "staging"
-url = "postgres://app_user:${STAGING_DB_PASSWORD}@staging-db.internal:5432/app"
+name   = "staging"
+url    = "postgres://app_user:${STAGING_DB_PASSWORD}@staging-db.example.com:5432/app"
 no_tls = false
 
 [[database]]
-name = "prod"
-url = "postgres://readonly_user:${PROD_DB_PASSWORD}@prod-db.internal:5432/app"
+name   = "prod"
+url    = "postgres://readonly_user:${PROD_DB_PASSWORD}@prod-db.example.com:5432/app"
 no_tls = false
+
+# ── MongoDB databases ──────────────────────────────────────────────────────────
+# The URI must include the database name in the path (e.g. /mydb).
+# Replica set URIs (host1:port,host2:port) are supported.
+
+[[mongo]]
+name = "mydb-local"
+uri  = "mongodb://user:${MONGO_PASSWORD}@localhost:27017/mydb"
+
+[[mongo]]
+name = "mydb-prod"
+uri  = "mongodb://user:${MONGO_PROD_PASSWORD}@mongo1.example.com:27017,mongo2.example.com:27017/mydb?authSource=admin"
