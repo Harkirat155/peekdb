@@ -10,6 +10,8 @@ pub struct QueryResult {
     pub row_count: usize,
     pub truncated: bool,
     pub command_tag: Option<String>,
+    /// True when column/PII redaction modified at least one cell.
+    pub redacted: bool,
 }
 
 #[derive(Debug, Error)]
@@ -32,6 +34,12 @@ pub enum DbError {
     QueryFailed(String),
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
+    #[error("Blocked: object '{name}' is not in the allowlist for this target")]
+    NotAllowedObject { name: String },
+    #[error("Rate limited: {0}")]
+    RateLimited(String),
+    #[error("Response too large: {0}")]
+    ResponseTooLarge(String),
 }
 
 #[async_trait]
@@ -87,6 +95,7 @@ pub struct MongoResult {
     pub documents: Vec<String>,
     pub count: usize,
     pub truncated: bool,
+    pub redacted: bool,
 }
 
 #[async_trait]
@@ -113,6 +122,7 @@ pub struct RedisResult {
     pub values: Vec<String>,
     pub count: usize,
     pub truncated: bool,
+    pub redacted: bool,
 }
 
 #[async_trait]

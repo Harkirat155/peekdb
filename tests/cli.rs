@@ -22,7 +22,8 @@ fn help_flag_succeeds() {
         .stdout(predicate::str::contains("serve"))
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("doctor"))
-        .stdout(predicate::str::contains("mcp-snippet"));
+        .stdout(predicate::str::contains("mcp-snippet"))
+        .stdout(predicate::str::contains("audit"));
 }
 
 #[test]
@@ -162,6 +163,73 @@ fn completions_zsh_succeeds() {
         .success()
         .stdout(predicate::str::contains("peekdb"));
 }
+
+#[test]
+fn audit_help_and_filter_against_fixture() {
+    bin()
+        .args(["audit", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("outcome"))
+        .stdout(predicate::str::contains("target"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.jsonl");
+    std::fs::write(
+        &path,
+        r#"{"timestamp":"2026-01-01T00:00:00Z","source":"cli","backend":"postgres","target":"staging","operation":"SELECT 1","outcome":"ok","detail":null,"row_count":1,"duration_ms":1,"truncated":false}
+{"timestamp":"2026-01-01T00:00:01Z","source":"mcp","backend":"postgres","target":"staging","operation":"DROP x","outcome":"blocked","detail":"Not allowed","row_count":null,"duration_ms":0,"truncated":false}
+{"timestamp":"2026-01-01T00:00:02Z","source":"cli","backend":"mongo","target":"other","operation":"find","outcome":"ok","detail":null,"row_count":0,"duration_ms":2,"truncated":false}
+"#,
+    )
+    .unwrap();
+
+    bin()
+        .args([
+            "audit",
+            "--path",
+            path.to_str().unwrap(),
+            "--target",
+            "staging",
+            "--blocked",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("blocked"))
+        .stdout(predicate::str::contains("staging"))
+        .stdout(predicate::str::contains("\"outcome\":\"ok\"").not());
+}
+
+#[test]
+fn query_allowlist_blocks_before_connecting() {
+    // allowlist is checked before a network connect — no live DB required.
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    f.write_all(
+        br#"
+        [[database]]
+        name = "only"
+        url = "postgres://user@localhost:1/db"
+        allow_tables = ["users"]
+        "#,
+    )
+    .unwrap();
+    bin()
+        .args([
+            "query",
+            "--config",
+            f.path().to_str().unwrap(),
+            "--sql",
+            "SELECT * FROM secrets",
+            "--no-audit-log",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("allowlist"));
+}
+
+// Rate limits are process-local (shared RateLimitRegistry per peekdb process).
+// Cross-process CLI black-box cannot assert them; see postgres unit test
+// `rate_limit_blocks_second_execute_on_real_db_path`.
 
 #[test]
 fn query_nonexistent_config_path_fails_with_clear_error() {

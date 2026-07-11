@@ -66,6 +66,14 @@ pub struct CompletionsArgs {
     pub shell: Shell,
 }
 
+pub struct AuditArgs {
+    pub path: Option<PathBuf>,
+    pub target: Option<String>,
+    pub outcome: Option<String>,
+    pub blocked: bool,
+    pub limit: usize,
+}
+
 pub fn run_init(args: InitArgs) {
     let path = args
         .path
@@ -211,6 +219,76 @@ pub fn run_completions(args: CompletionsArgs) {
     let mut cmd = crate::Args::command();
     let name = cmd.get_name().to_string();
     generate(args.shell, &mut cmd, name, &mut std::io::stdout());
+}
+
+/// Resolve default audit path: explicit → next to config → ./audit.jsonl
+fn resolve_audit_path(explicit: Option<PathBuf>) -> PathBuf {
+    if let Some(p) = explicit {
+        return p;
+    }
+    if let Ok(cfg) = paths::resolve_config_path(None) {
+        return cfg
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("audit.jsonl");
+    }
+    PathBuf::from("audit.jsonl")
+}
+
+pub fn run_audit(args: AuditArgs) {
+    let path = resolve_audit_path(args.path);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Fatal: cannot read audit log {}: {}", path.display(), e);
+            std::process::exit(1);
+        }
+    };
+
+    let outcome_filter = if args.blocked {
+        Some("blocked".to_string())
+    } else {
+        args.outcome.map(|s| s.to_ascii_lowercase())
+    };
+
+    let mut matched: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(ref t) = args.target {
+            if v.get("target").and_then(|x| x.as_str()) != Some(t.as_str()) {
+                continue;
+            }
+        }
+        if let Some(ref o) = outcome_filter {
+            let got = v
+                .get("outcome")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if &got != o {
+                continue;
+            }
+        }
+        matched.push(line.to_string());
+    }
+
+    let limit = args.limit.max(1);
+    let start = matched.len().saturating_sub(limit);
+    for line in &matched[start..] {
+        println!("{line}");
+    }
+    eprintln!(
+        "# {} matching line(s) from {} (showing last {})",
+        matched.len(),
+        path.display(),
+        matched[start..].len()
+    );
 }
 
 pub async fn run_doctor(args: DoctorArgs) {

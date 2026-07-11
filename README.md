@@ -182,9 +182,10 @@ Commands:
   config list   List targets with secrets masked
   mcp-snippet   Print a ready-to-paste MCP client config
   completions   Generate shell completions (bash/zsh/fish/…)
+  audit         Filter the JSONL audit log (--target / --blocked / --outcome)
 ```
 
-### `init` / `doctor` / `config` / `mcp-snippet`
+### `init` / `doctor` / `config` / `mcp-snippet` / `audit`
 
 ```bash
 peekdb init                          # ~/.config/peekdb/databases.toml
@@ -193,6 +194,8 @@ peekdb doctor                        # SELECT 1 / list_collections / PING
 peekdb config list                   # secrets masked
 peekdb mcp-snippet                   # Claude / Cursor JSON
 peekdb completions zsh > _peekdb
+peekdb audit --blocked               # recent blocked attempts
+peekdb audit --target staging --limit 50
 ```
 
 ### `query` (PostgreSQL)
@@ -355,6 +358,27 @@ Documents are serialized as MongoDB Extended JSON (`{"$oid": "..."}` for ObjectI
 ```
 {"email": "alice@example.com", "plan": "pro"}
 ```
+
+## Optional safety controls (Phase 2)
+
+Per target in `databases.toml` (all optional; defaults keep full access within RO rules):
+
+```toml
+[[database]]
+name = "staging"
+url = "postgres://ro:${STAGING_DB_PASSWORD}@db/app"
+allow_tables = ["users", "orders"]
+max_calls_per_minute = 60
+max_rows_per_minute = 5000
+max_response_bytes = 1048576
+redact_columns = ["email"]
+redact_patterns = ["*ssn*"]
+```
+
+- **Allowlists** apply on SQL table refs (FROM/JOIN/TABLE), Mongo collections, Redis keys, and filter discovery lists.  
+- **Rate limits** are process-local sliding windows (calls recorded per attempt).  
+- **Redaction** rewrites matching columns/fields to `[REDACTED]` and sets audit `redacted: true`.  
+- **Max response bytes** truncates large payloads or errors if a single row is still too large.
 
 ## Security model
 

@@ -20,6 +20,13 @@ no_tls = false
 name   = "prod"
 url    = "postgres://readonly_user:${PROD_DB_PASSWORD}@prod-db.example.com:5432/app"
 no_tls = false
+# Optional Phase 2 safety controls (all off by default):
+# allow_tables = ["users", "orders"]
+# max_calls_per_minute = 60
+# max_rows_per_minute = 5000
+# max_response_bytes = 1048576
+# redact_columns = ["email", "ssn"]
+# redact_patterns = ["*password*", "*secret*"]
 
 # ── MongoDB databases ──────────────────────────────────────────────────────────
 # The URI must include the database name in the path (e.g. /mydb).

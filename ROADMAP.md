@@ -13,17 +13,18 @@ Site: [harkirat155.github.io/peekdb](https://harkirat155.github.io/peekdb/) · R
 
 | Surface | Entry | Capabilities |
 |---------|-------|--------------|
-| MCP (stdio) | `peekdb serve` | `sql_query`, `mongo_query`, `redis_query` |
-| CLI one-shot | `query` / `mongo` / `redis` | Pretty tables or `--json` |
+| MCP (stdio) | `peekdb serve` | Discovery tools + `sql_query` / `mongo_query` / `redis_query` (JSON by default) + Resources |
+| CLI | `query` / `mongo` / `redis` / `init` / `doctor` / `config` / `mcp-snippet` / `completions` / `audit` | Pretty tables or `--json`; config discovery |
 
 **Differentiator — multi-layer enforcement:**
 
 - **Postgres:** statement allowlist + single-statement + session RO + transaction RO + timeouts + row caps  
-- **Mongo:** operation allowlist + `$out`/`$merge` blocked  
+- **Mongo:** operation allowlist + recursive `$out`/`$merge` block (any depth under `$facet` / `$lookup`)  
 - **Redis:** deny-by-default command allowlist  
 - **Everywhere:** env password interpolation, no literal secrets by default, append-only audit log  
+- **Optional (config):** table/collection allowlists, rate limits, max response bytes, column/PII redaction  
 
-**Experience gaps:** no schema discovery tools, MCP returns ASCII tables as text, manual TOML only, no REPL, no rate limits / table allowlists / PII redaction.
+**Still open (Phase 3+):** interactive REPL/TUI, favorites, multi-format CLI output (vertical/csv), prod profile gating, crates.io polish.
 
 ---
 
@@ -33,141 +34,69 @@ Site: [harkirat155.github.io/peekdb](https://harkirat155.github.io/peekdb/) · R
 2. **Controls over connectors** — deepen safety and UX on PG/Mongo/Redis before adding engines.  
 3. **Dogfood gate** — each phase must make the maintainer want daily use before marketing it.  
 4. **No write mode. Ever.**  
+5. **Discovery and safety ride `execute_*`** — no parallel unguarded connection API.
 
 ---
 
-## Phase 0 — Product surface & install
+## Phase status
 
-*Goal: zero-friction first run.*
+| Phase | Status |
+|-------|--------|
+| 0 Install / doctor / config UX | **Done** |
+| 1 Agent schema tools + JSON | **Done** |
+| 2 Safety controls | **Done** (allowlists, rate limits, redaction, max bytes, nested Mongo RO, `audit` CLI) |
+| 3 REPL / TUI | Planned |
+| 4 Platform | Ongoing |
+| Landing page | Shipped (`docs/` → GitHub Pages) |
 
-| Deliverable | Notes |
-|-------------|--------|
-| `peekdb init` | Scaffold `~/.config/peekdb/databases.toml` + env export examples |
-| Config discovery | `./databases.toml` → `$PEEKDB_CONFIG` → `~/.config/peekdb/databases.toml` |
-| `peekdb doctor` | Probe every named target; green/red matrix |
-| `peekdb config list` | Named targets with secrets masked |
-| `peekdb mcp-snippet` | Print ready Claude / Cursor / Grok MCP JSON |
-| Shell completions | clap generate for zsh / bash / fish |
-| Install story | Releases, `cargo install`, optional Homebrew later |
+### Learnings from Phase 0–2 build
+
+1. **Discovery should ride `execute_*`** — list/describe/sample call the same audited RO path as queries.  
+2. **Fewer tools beat per-backend clones** — `list_objects` / `describe_object` / `sample_object` resolve backend from unique target names.  
+3. **JSON default is a deliberate MCP break** — agents parse structured envelopes; humans use CLI tables or `format: "table"`.  
+4. **Identifier allowlist for sample SQL** — only safe `[A-Za-z_][A-Za-z0-9_]*` identifiers.  
+5. **Redis SCAN is one cursor step** — pattern refinement, not full keyspace dump.  
+6. **`list_targets` is pure config** — no audit line.  
+7. **Rate limits are process-local** — each peekdb process has its own window counters (not multi-process).  
+8. **Nested write stages need a full BSON walk** — top-level stage keys alone miss `$facet` / `$lookup` sub-pipelines.  
+9. **Record rate-limit calls on attempt** — otherwise failed connects never consume quota and agents can still hammer.
 
 ---
 
-## Phase 1 — Agent DX (highest leverage)
+## Phase 2 controls (shipped)
 
-*Goal: agents stop guessing; results are machine-native.*
+Optional TOML keys per `[[database]]` / `[[mongo]]` / `[[redis]]` (see `databases.toml.example`):
 
-### New MCP tools (only for configured backends)
+| Key | Effect |
+|-----|--------|
+| `allow_tables` / `allow_collections` | Restrict objects; empty = unrestricted |
+| `max_calls_per_minute` | Sliding-window call cap |
+| `max_rows_per_minute` | Sliding-window rows/docs cap |
+| `max_response_bytes` | Truncate/error oversized payloads |
+| `redact_columns` / `redact_patterns` | Mask matching fields in results; audit `redacted` |
 
-| Tool | Purpose |
-|------|---------|
-| `list_targets` | Named DBs + backend type (always first) |
-| `list_tables` / `list_collections` / capped `SCAN` | Structure discovery |
-| `describe_table` / `describe_collection` | Columns, types, indexes |
-| `sample_rows` / `sample_docs` | Shape inference |
-| Existing query tools | Keep; add structured JSON result mode |
-
-### MCP result contract
-
-```json
-{
-  "columns": ["id", "email"],
-  "rows": [[1, "a@x.com"]],
-  "meta": {
-    "target": "staging",
-    "backend": "postgres",
-    "row_count": 1,
-    "truncated": false,
-    "duration_ms": 12
-  }
-}
+```bash
+peekdb audit --target staging --blocked
+peekdb audit --path ./audit.jsonl --outcome ok --limit 20
 ```
 
-- MCP default = **JSON**; optional `format: "table"`.  
-- CLI stays pretty-by-default + `--json`.
-
-### MCP Resources
-
-- `peekdb://{target}/schema`  
-- `peekdb://{target}/tables/{name}`  
-
-Passive schema context without tool spam. Shorter tool descriptions; point agents at `list_*` first.
-
 ---
 
-## Phase 2 — Safety for real staging / prod
-
-| Control | Design |
-|---------|--------|
-| Rate limit | Per-target calls/min + rows/min |
-| Table / collection allowlists | Optional per config entry |
-| PII / column redaction | Configured columns or patterns; audit marks `redacted` |
-| Max response bytes | Cap agent context blowups |
-| Nested Mongo write stages | Detect `$out`/`$merge` inside `$facet` / `$lookup` |
-| `peekdb audit` | Filter / tail JSONL for humans |
-| Profiles | `env = "prod"` tags; refuse prod unless opted in |
-
----
-
-## Phase 3 — Human delight
+## Phase 3 — Human delight (next)
 
 | Item | Notes |
 |------|--------|
 | `peekdb repl` | Multi-line, history, `\d` / `\dt` / `\c` |
 | Output modes | table · vertical · csv · tsv · json |
-| Favorites | Named snippets in config |
-| Query history | Successful queries for re-run |
-| `peekdb explore` (TUI) | Optional ratatui explorer **after** schema APIs exist |
-
----
-
-## Phase 4 — Platform polish (ongoing)
-
-- crates.io + Homebrew / Scoop notes  
-- MCP protocol conformance (SDK only if hand-rolled hurts)  
-- Agent recipes (Claude / Cursor / Grok configs)  
-- Security diagrams on the site  
-
----
-
-## Differentiating bets (category-defining)
-
-1. **`preview: true`** — plan / approx row count without full run  
-2. **Sticky session** — last target + schema cache in MCP process  
-3. **Auto EXPLAIN meta** on slow Postgres queries  
-4. **Client identity** in audit (`mcp` / `cli` / `repl` + optional client name)  
-5. **`peekdb prove`** — battery of blocked writes → green checklist  
-6. **Local schema cache** (`.peekdb/schema-cache.json`, TTL)  
+| Favorites | Named snippets |
+| `peekdb explore` (TUI) | After schema APIs (already exist) |
 
 ---
 
 ## Explicitly out of scope
 
-- Headline roadmap for MySQL / SQLite / ClickHouse / etc. (traits stay open)  
+- Headline roadmap for more engines  
 - Multi-tenant cloud SaaS  
 - Any write path  
-- Premature MCP stack rewrite  
 
----
-
-## Status
-
-| Phase | Status |
-|-------|--------|
-| 0 Install / doctor / config UX | **Done** (`init`, `doctor`, `config list`, `mcp-snippet`, completions, config discovery) |
-| 1 Agent schema tools + JSON | **Done** (discovery tools, JSON envelopes, MCP resources) |
-| 2 Safety controls | Next |
-| 3 REPL / TUI | Planned |
-| 4 Platform | Ongoing |
-| Landing page | Shipped (`docs/` → GitHub Pages) → [site](https://harkirat155.github.io/peekdb/) |
-
-### Learnings from Phase 0–1 build
-
-1. **Discovery should ride `execute_*`** — list/describe/sample call the same audited RO path as queries. No parallel connection API = no audit gaps.
-2. **Fewer tools beat per-backend clones** — `list_objects` / `describe_object` / `sample_object` resolve backend from unique target names (config already forbids name collisions).
-3. **JSON default is a deliberate MCP break** — agents parse structured `columns`/`rows`/`meta`; humans use CLI tables or `format: "table"`.
-4. **Identifier allowlist for sample SQL** — only `[A-Za-z_][A-Za-z0-9_]*` (optional `schema.table`); never string-interpolate free-form names.
-5. **Redis SCAN is one cursor step** — full keyspace dump is an anti-pattern; pattern refinement is the UX.
-6. **`list_targets` is pure config** — no audit line (nothing hit a database). Document that for operators reading audit logs.
-7. **Landing + Pages ship independently of binary** — `docs/` workflow; enable Actions Pages once on the repo.
-
-Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Prefer opening an issue against a phase item before a large PR.
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).

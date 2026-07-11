@@ -1,4 +1,7 @@
 use super::traits::{DbError, MongoDatabase, MongoOperation, MongoQuery, MongoResult};
+use crate::policy::{
+    cap_string_list_bytes, redact_json_documents, RateLimiter, TargetPolicy,
+};
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use mongodb::{
@@ -6,6 +9,7 @@ use mongodb::{
     options::{AggregateOptions, ClientOptions, FindOptions},
     Client,
 };
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::info;
@@ -21,6 +25,8 @@ pub struct MongoDb {
     dbname: String,
     query_timeout_ms: u64,
     client: Mutex<Option<Client>>,
+    policy: TargetPolicy,
+    rate: Option<Arc<RateLimiter>>,
 }
 
 impl MongoDb {
@@ -31,12 +37,20 @@ impl MongoDb {
             dbname: dbname.into(),
             query_timeout_ms: DEFAULT_QUERY_TIMEOUT_MS,
             client: Mutex::new(None),
+            policy: TargetPolicy::default(),
+            rate: None,
         }
     }
 
     /// Overrides the default 30s `maxTimeMS` for this connection's find/aggregate calls.
     pub fn with_query_timeout_ms(mut self, ms: u64) -> Self {
         self.query_timeout_ms = ms;
+        self
+    }
+
+    pub fn with_safety(mut self, policy: TargetPolicy, rate: Option<Arc<RateLimiter>>) -> Self {
+        self.policy = policy;
+        self.rate = rate;
         self
     }
 
@@ -74,21 +88,40 @@ fn parse_doc(json: Option<&str>) -> Result<Document, DbError> {
     }
 }
 
-/// Reject $out / $merge stages — they write to a collection.
+/// Reject `$out` / `$merge` at any depth (including inside `$facet` / `$lookup` sub-pipelines).
 fn check_pipeline_readonly(pipeline: &[Document]) -> Result<(), DbError> {
     for stage in pipeline {
-        if stage.contains_key("$out") {
-            return Err(DbError::BlockedKeyword {
-                keyword: "$out".into(),
-            });
-        }
-        if stage.contains_key("$merge") {
-            return Err(DbError::BlockedKeyword {
-                keyword: "$merge".into(),
-            });
-        }
+        walk_bson_for_write_stages(&Bson::Document(stage.clone()))?;
     }
     Ok(())
+}
+
+fn walk_bson_for_write_stages(value: &Bson) -> Result<(), DbError> {
+    match value {
+        Bson::Document(doc) => {
+            if doc.contains_key("$out") {
+                return Err(DbError::BlockedKeyword {
+                    keyword: "$out".into(),
+                });
+            }
+            if doc.contains_key("$merge") {
+                return Err(DbError::BlockedKeyword {
+                    keyword: "$merge".into(),
+                });
+            }
+            for (_k, v) in doc.iter() {
+                walk_bson_for_write_stages(v)?;
+            }
+            Ok(())
+        }
+        Bson::Array(items) => {
+            for item in items {
+                walk_bson_for_write_stages(item)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn bson_to_json_string(b: &Bson) -> String {
@@ -102,6 +135,14 @@ fn doc_to_json_string(d: &Document) -> String {
 #[async_trait]
 impl MongoDatabase for MongoDb {
     async fn execute_mongo(&self, query: MongoQuery) -> Result<MongoResult, DbError> {
+        if let Some(rate) = &self.rate {
+            rate.check_call()?;
+            rate.record_call();
+        }
+        if let Some(coll) = query.collection.as_deref() {
+            self.policy.allow_objects.check(coll)?;
+        }
+
         let db = self.get_db().await?;
         let max = query.limit;
 
@@ -111,7 +152,7 @@ impl MongoDatabase for MongoDb {
             })
         };
 
-        match query.operation {
+        let mut result = match query.operation {
             MongoOperation::ListCollections => {
                 let names = db
                     .list_collection_names(None)
@@ -119,11 +160,12 @@ impl MongoDatabase for MongoDb {
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?;
                 let docs: Vec<String> = names.iter().map(|n| format!("\"{}\"", n)).collect();
                 let count = docs.len();
-                Ok(MongoResult {
+                MongoResult {
                     documents: docs,
                     count,
+                    redacted: false,
                     truncated: false,
-                })
+                }
             }
 
             MongoOperation::Count => {
@@ -133,11 +175,12 @@ impl MongoDatabase for MongoDb {
                     .count_documents(filter, None)
                     .await
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-                Ok(MongoResult {
+                MongoResult {
                     documents: vec![count.to_string()],
                     count: 1,
+                    redacted: false,
                     truncated: false,
-                })
+                }
             }
 
             MongoOperation::Distinct => {
@@ -153,11 +196,12 @@ impl MongoDatabase for MongoDb {
                 let truncated = values.len() > max;
                 let docs: Vec<String> = values.iter().take(max).map(bson_to_json_string).collect();
                 let count = docs.len();
-                Ok(MongoResult {
+                MongoResult {
                     documents: docs,
                     count,
+                    redacted: false,
                     truncated,
-                })
+                }
             }
 
             MongoOperation::Find => {
@@ -210,11 +254,12 @@ impl MongoDatabase for MongoDb {
                     docs.push(doc_to_json_string(&doc));
                 }
                 let count = docs.len();
-                Ok(MongoResult {
+                MongoResult {
                     documents: docs,
                     count,
+                    redacted: false,
                     truncated,
-                })
+                }
             }
 
             MongoOperation::Aggregate => {
@@ -264,11 +309,12 @@ impl MongoDatabase for MongoDb {
                     docs.push(doc_to_json_string(&doc));
                 }
                 let count = docs.len();
-                Ok(MongoResult {
+                MongoResult {
                     documents: docs,
                     count,
+                    redacted: false,
                     truncated,
-                })
+                }
             }
 
             MongoOperation::ListIndexes => {
@@ -296,16 +342,45 @@ impl MongoDatabase for MongoDb {
                     docs.push(doc_to_json_string(&entry));
                 }
                 let count = docs.len();
-                Ok(MongoResult {
+                MongoResult {
                     documents: docs,
                     count,
+                    redacted: false,
                     truncated: false,
-                })
+                }
+            }
+
+        };
+
+        // Allowlist filters list_collections output (discovery inherits execute path).
+        if matches!(query.operation, MongoOperation::ListCollections)
+            && !self.policy.allow_objects.is_unrestricted()
+        {
+            let names: Vec<String> = result
+                .documents
+                .iter()
+                .map(|s| s.trim_matches('"').to_string())
+                .collect();
+            let filtered = self.policy.allow_objects.filter_list(names);
+            result.documents = filtered.iter().map(|n| format!("\"{n}\"")).collect();
+            result.count = result.documents.len();
+        }
+
+        if let Some(rate) = &self.rate {
+            rate.check_and_record_rows(result.count as u64)?;
+        }
+        if redact_json_documents(&mut result.documents, &self.policy.redact) {
+            result.redacted = true;
+        }
+        if let Some(max_b) = self.policy.max_response_bytes {
+            if cap_string_list_bytes(&mut result.documents, max_b)? {
+                result.truncated = true;
+                result.count = result.documents.len();
             }
         }
+        Ok(result)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,19 +435,52 @@ mod tests {
     }
 
     #[test]
-    fn known_gap_nested_out_inside_facet_is_not_caught() {
-        // check_pipeline_readonly only inspects top-level stage keys. A $out/$merge
-        // nested inside a $facet or $lookup sub-pipeline is NOT detected today.
-        // Characterization test documenting the gap (flagged for the security-hardening
-        // track), not a desired behavior.
+    fn nested_out_inside_facet_is_blocked() {
         let pipeline = vec![doc! {
             "$facet": {
                 "sneaky": [{"$out": "other_collection"}]
             }
         }];
-        assert!(
-            check_pipeline_readonly(&pipeline).is_ok(),
-            "this documents a known gap — nested $out is not currently detected"
-        );
+        match check_pipeline_readonly(&pipeline) {
+            Err(DbError::BlockedKeyword { keyword }) => assert_eq!(keyword, "$out"),
+            other => panic!("expected nested $out under $facet to be blocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_merge_inside_lookup_pipeline_is_blocked() {
+        let pipeline = vec![doc! {
+            "$lookup": {
+                "from": "other",
+                "pipeline": [
+                    {"$match": {}},
+                    {"$merge": {"into": "sink"}}
+                ],
+                "as": "joined"
+            }
+        }];
+        match check_pipeline_readonly(&pipeline) {
+            Err(DbError::BlockedKeyword { keyword }) => assert_eq!(keyword, "$merge"),
+            other => panic!("expected nested $merge under $lookup to be blocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deep_nested_out_under_facet_and_lookup_is_blocked() {
+        let pipeline = vec![doc! {
+            "$facet": {
+                "branch": [{
+                    "$lookup": {
+                        "from": "x",
+                        "pipeline": [{"$out": "evil"}],
+                        "as": "y"
+                    }
+                }]
+            }
+        }];
+        match check_pipeline_readonly(&pipeline) {
+            Err(DbError::BlockedKeyword { keyword }) => assert_eq!(keyword, "$out"),
+            other => panic!("expected deeply nested $out to be blocked, got {other:?}"),
+        }
     }
 }

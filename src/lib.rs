@@ -3,16 +3,18 @@ pub mod cli;
 pub mod config;
 pub mod db;
 pub mod paths;
+pub mod policy;
 pub mod server;
 pub mod setup;
 
 use audit::{AuditLog, AuditedDatabase, AuditedMongo, AuditedRedis};
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
-use config::{interpolate_env, Config, DatabaseConfig, MongoConfig, RedisConfig};
+use config::{interpolate_env, Config, DatabaseConfig, MongoConfig, RedisConfig, SafetyConfig};
 use db::mongo::MongoDb;
 use db::postgres::PostgresDb;
 use db::redis::RedisDb;
+use policy::{ObjectAllowlist, RateLimitRegistry, RedactRules, TargetPolicy};
 use db::traits::{Database, MongoDatabase, MongoOperation, MongoQuery, RedisDatabase, RedisQuery};
 use mongodb::options::ClientOptions;
 use std::collections::HashMap;
@@ -56,6 +58,8 @@ enum Command {
     McpSnippet(McpSnippetArgs),
     /// Generate shell completions (bash, zsh, fish, elvish, powershell)
     Completions(CompletionsArgs),
+    /// Read and filter the append-only JSONL audit log
+    Audit(AuditArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -102,6 +106,25 @@ struct McpSnippetArgs {
 struct CompletionsArgs {
     /// Shell to generate completions for
     shell: Shell,
+}
+
+#[derive(clap::Args, Debug)]
+struct AuditArgs {
+    /// Path to audit JSONL (default: next to discovered config, or ./audit.jsonl)
+    #[arg(long)]
+    path: Option<PathBuf>,
+    /// Filter by config target name
+    #[arg(long)]
+    target: Option<String>,
+    /// Filter by outcome: ok | blocked | error
+    #[arg(long)]
+    outcome: Option<String>,
+    /// Shortcut for --outcome blocked
+    #[arg(long, default_value_t = false)]
+    blocked: bool,
+    /// Max lines to print (from the end of the matching stream)
+    #[arg(long, default_value = "100")]
+    limit: usize,
 }
 
 // ── Serve sub-command (original behaviour) ────────────────────────────────────
@@ -300,6 +323,13 @@ pub async fn run() {
         Command::Completions(a) => {
             setup::run_completions(setup::CompletionsArgs { shell: a.shell })
         }
+        Command::Audit(a) => setup::run_audit(setup::AuditArgs {
+            path: a.path,
+            target: a.target,
+            outcome: a.outcome,
+            blocked: a.blocked,
+            limit: a.limit,
+        }),
     }
 }
 
@@ -319,6 +349,7 @@ fn inject_serve_default(mut args: Vec<String>) -> Vec<String> {
         "config",
         "mcp-snippet",
         "completions",
+        "audit",
     ];
     const PASSTHROUGH: &[&str] = &["--help", "-h", "--version", "-V"];
 
@@ -365,6 +396,7 @@ mod inject_serve_default_tests {
             "config",
             "mcp-snippet",
             "completions",
+            "audit",
         ] {
             assert_eq!(inject_serve_default(v(&["bin", sub])), v(&["bin", sub]));
         }
@@ -407,24 +439,61 @@ fn resolve_audit_log_path(
     config_path.map(|p| p.parent().unwrap_or(Path::new(".")).join("audit.jsonl"))
 }
 
-fn new_postgres_db(cfg: &DatabaseConfig, url: String) -> PostgresDb {
+fn safety_from_config(s: &SafetyConfig) -> TargetPolicy {
+    TargetPolicy {
+        allow_objects: ObjectAllowlist::new(s.allow_objects()),
+        redact: RedactRules {
+            columns: s.redact_columns.clone(),
+            patterns: s.redact_patterns.clone(),
+        },
+        max_response_bytes: s.max_response_bytes,
+    }
+}
+
+fn new_postgres_db(
+    cfg: &DatabaseConfig,
+    url: String,
+    rates: &RateLimitRegistry,
+) -> PostgresDb {
     let db = PostgresDb::new(&cfg.name, url, cfg.no_tls);
-    match cfg.statement_timeout_ms {
+    let db = match cfg.statement_timeout_ms {
         Some(ms) => db.with_statement_timeout_ms(ms),
         None => db,
-    }
+    };
+    let rate = rates.get_or_insert(
+        &cfg.name,
+        cfg.safety.max_calls_per_minute,
+        cfg.safety.max_rows_per_minute,
+    );
+    db.with_safety(safety_from_config(&cfg.safety), rate)
 }
 
-fn new_mongo_db(cfg: &MongoConfig, uri: String, dbname: String) -> MongoDb {
+fn new_mongo_db(
+    cfg: &MongoConfig,
+    uri: String,
+    dbname: String,
+    rates: &RateLimitRegistry,
+) -> MongoDb {
     let db = MongoDb::new(&cfg.name, uri, dbname);
-    match cfg.query_timeout_ms {
+    let db = match cfg.query_timeout_ms {
         Some(ms) => db.with_query_timeout_ms(ms),
         None => db,
-    }
+    };
+    let rate = rates.get_or_insert(
+        &cfg.name,
+        cfg.safety.max_calls_per_minute,
+        cfg.safety.max_rows_per_minute,
+    );
+    db.with_safety(safety_from_config(&cfg.safety), rate)
 }
 
-fn new_redis_db(cfg: &RedisConfig, url: String) -> RedisDb {
-    RedisDb::new(&cfg.name, url)
+fn new_redis_db(cfg: &RedisConfig, url: String, rates: &RateLimitRegistry) -> RedisDb {
+    let rate = rates.get_or_insert(
+        &cfg.name,
+        cfg.safety.max_calls_per_minute,
+        cfg.safety.max_rows_per_minute,
+    );
+    RedisDb::new(&cfg.name, url).with_safety(safety_from_config(&cfg.safety), rate)
 }
 
 async fn build_pg_databases(
@@ -433,10 +502,11 @@ async fn build_pg_databases(
     audit: &Option<Arc<AuditLog>>,
 ) -> HashMap<String, Arc<dyn Database>> {
     let config = load_config(path);
+    let rates = RateLimitRegistry::default();
     let mut databases: HashMap<String, Arc<dyn Database>> = HashMap::new();
     for cfg in config.database {
         let url = resolve_url(&cfg.name, &cfg.url);
-        let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url));
+        let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url, &rates));
         let db = match audit {
             Some(log) => Arc::new(AuditedDatabase::new(
                 db,
@@ -457,6 +527,7 @@ async fn build_mongo_databases(
     audit: &Option<Arc<AuditLog>>,
 ) -> HashMap<String, Arc<dyn MongoDatabase>> {
     let config = load_config(path);
+    let rates = RateLimitRegistry::default();
     let mut dbs: HashMap<String, Arc<dyn MongoDatabase>> = HashMap::new();
     for cfg in config.mongo {
         let uri = resolve_url(&cfg.name, &cfg.uri);
@@ -471,7 +542,7 @@ async fn build_mongo_databases(
             );
             std::process::exit(1);
         });
-        let db: Arc<dyn MongoDatabase> = Arc::new(new_mongo_db(&cfg, uri, dbname));
+        let db: Arc<dyn MongoDatabase> = Arc::new(new_mongo_db(&cfg, uri, dbname, &rates));
         let db = match audit {
             Some(log) => Arc::new(AuditedMongo::new(db, cfg.name.clone(), source, log.clone()))
                 as Arc<dyn MongoDatabase>,
@@ -488,10 +559,11 @@ async fn build_redis_databases(
     audit: &Option<Arc<AuditLog>>,
 ) -> HashMap<String, Arc<dyn RedisDatabase>> {
     let config = load_config(path);
+    let rates = RateLimitRegistry::default();
     let mut dbs: HashMap<String, Arc<dyn RedisDatabase>> = HashMap::new();
     for cfg in config.redis {
         let url = resolve_url(&cfg.name, &cfg.url);
-        let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url));
+        let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url, &rates));
         let db = match audit {
             Some(log) => Arc::new(AuditedRedis::new(db, cfg.name.clone(), source, log.clone()))
                 as Arc<dyn RedisDatabase>,
@@ -726,6 +798,7 @@ async fn run_serve(args: ServeArgs) {
                 no_tls: args.no_tls,
                 allow_literal_password: true,
                 statement_timeout_ms: None,
+                safety: Default::default(),
             }],
             vec![],
             vec![],
@@ -750,11 +823,12 @@ async fn run_serve(args: ServeArgs) {
     let audit_path =
         resolve_audit_log_path(config_path.as_deref(), &args.audit_log, args.no_audit_log);
     let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
+    let rates = RateLimitRegistry::default();
 
     let mut databases: HashMap<String, Arc<dyn Database>> = HashMap::new();
     for cfg in pg_configs {
         let url = resolve_url(&cfg.name, &cfg.url);
-        let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url));
+        let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url, &rates));
         let db = match &audit {
             Some(log) => Arc::new(AuditedDatabase::new(
                 db,
@@ -778,7 +852,7 @@ async fn run_serve(args: ServeArgs) {
             eprintln!("Fatal: mongo '{}' URI must include database name", cfg.name);
             std::process::exit(1);
         });
-        let db: Arc<dyn MongoDatabase> = Arc::new(new_mongo_db(&cfg, uri, dbname));
+        let db: Arc<dyn MongoDatabase> = Arc::new(new_mongo_db(&cfg, uri, dbname, &rates));
         let db = match &audit {
             Some(log) => Arc::new(AuditedMongo::new(db, cfg.name.clone(), "mcp", log.clone()))
                 as Arc<dyn MongoDatabase>,
@@ -790,7 +864,7 @@ async fn run_serve(args: ServeArgs) {
     let mut redis_databases: HashMap<String, Arc<dyn RedisDatabase>> = HashMap::new();
     for cfg in redis_configs {
         let url = resolve_url(&cfg.name, &cfg.url);
-        let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url));
+        let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url, &rates));
         let db = match &audit {
             Some(log) => Arc::new(AuditedRedis::new(db, cfg.name.clone(), "mcp", log.clone()))
                 as Arc<dyn RedisDatabase>,

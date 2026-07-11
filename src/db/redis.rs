@@ -1,7 +1,9 @@
 use super::traits::{DbError, RedisDatabase, RedisQuery, RedisResult};
+use crate::policy::{cap_string_list_bytes, RateLimiter, TargetPolicy};
 use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 use redis::Value;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -136,6 +138,8 @@ pub struct RedisDb {
     name: String,
     url: String,
     conn: Mutex<Option<ConnectionManager>>,
+    policy: TargetPolicy,
+    rate: Option<Arc<RateLimiter>>,
 }
 
 impl RedisDb {
@@ -146,7 +150,15 @@ impl RedisDb {
             name: name.into(),
             url: url.into(),
             conn: Mutex::new(None),
+            policy: TargetPolicy::default(),
+            rate: None,
         }
+    }
+
+    pub fn with_safety(mut self, policy: TargetPolicy, rate: Option<Arc<RateLimiter>>) -> Self {
+        self.policy = policy;
+        self.rate = rate;
+        self
     }
 
     /// Returns a cloned handle to the connection manager (cheap — it's an internal
@@ -173,6 +185,32 @@ impl RedisDb {
 impl RedisDatabase for RedisDb {
     async fn execute_redis(&self, query: RedisQuery) -> Result<RedisResult, DbError> {
         check_allowed_redis(&query.command, &query.args)?;
+        if let Some(rate) = &self.rate {
+            rate.check_call()?;
+            rate.record_call();
+        }
+        // First string arg is treated as the primary key for allowlist checks
+        // (GET key, HGET key field, SCAN cursor MATCH pat … — SCAN skips allowlist
+        // on the cursor; MATCH pattern is checked when present).
+        if !self.policy.allow_objects.is_unrestricted() {
+            let upper = query.command.to_uppercase();
+            if upper == "SCAN" || upper == "HSCAN" || upper == "SSCAN" || upper == "ZSCAN" {
+                if let Some(i) = query
+                    .args
+                    .iter()
+                    .position(|a| a.eq_ignore_ascii_case("MATCH"))
+                {
+                    if let Some(pat) = query.args.get(i + 1) {
+                        // Pattern itself must be allowed as a prefix pattern entry or *
+                        if pat != "*" {
+                            self.policy.allow_objects.check(pat)?;
+                        }
+                    }
+                }
+            } else if let Some(key) = query.args.first() {
+                self.policy.allow_objects.check(key)?;
+            }
+        }
 
         let mut conn = self.ensure_connected().await?;
 
@@ -188,11 +226,22 @@ impl RedisDatabase for RedisDb {
 
         let (values, truncated) = value_to_display(&value, &query);
         let count = values.len();
-        Ok(RedisResult {
+        let mut result = RedisResult {
             values,
             count,
             truncated,
-        })
+            redacted: false,
+        };
+        if let Some(rate) = &self.rate {
+            rate.check_and_record_rows(result.count as u64)?;
+        }
+        if let Some(max_b) = self.policy.max_response_bytes {
+            if cap_string_list_bytes(&mut result.values, max_b)? {
+                result.truncated = true;
+                result.count = result.values.len();
+            }
+        }
+        Ok(result)
     }
 }
 

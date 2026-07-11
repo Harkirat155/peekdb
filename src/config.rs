@@ -12,6 +12,41 @@ pub struct Config {
     pub redis: Vec<RedisConfig>,
 }
 
+/// Optional safety controls shared by postgres / mongo / redis config entries.
+/// All fields default off / unrestricted so existing configs keep working.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct SafetyConfig {
+    /// When non-empty, only these tables/collections/key-patterns may be touched.
+    #[serde(default)]
+    pub allow_tables: Vec<String>,
+    /// Alias for allow_tables on mongo (both accepted).
+    #[serde(default)]
+    pub allow_collections: Vec<String>,
+    /// Max tool/query calls per rolling minute for this target.
+    #[serde(default)]
+    pub max_calls_per_minute: Option<u64>,
+    /// Max rows/documents returned per rolling minute for this target.
+    #[serde(default)]
+    pub max_rows_per_minute: Option<u64>,
+    /// Cap approximate response payload size (bytes); truncates or errors.
+    #[serde(default)]
+    pub max_response_bytes: Option<usize>,
+    /// Exact column/field names to redact in results (case-insensitive).
+    #[serde(default)]
+    pub redact_columns: Vec<String>,
+    /// Glob-style column name patterns (`*ssn*`) to redact.
+    #[serde(default)]
+    pub redact_patterns: Vec<String>,
+}
+
+impl SafetyConfig {
+    pub fn allow_objects(&self) -> Vec<String> {
+        let mut v = self.allow_tables.clone();
+        v.extend(self.allow_collections.iter().cloned());
+        v
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct DatabaseConfig {
     pub name: String,
@@ -26,6 +61,8 @@ pub struct DatabaseConfig {
     /// built-in default (30s) rather than duplicating that default here.
     #[serde(default)]
     pub statement_timeout_ms: Option<u64>,
+    #[serde(flatten)]
+    pub safety: SafetyConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -37,6 +74,8 @@ pub struct MongoConfig {
     /// Per-query `maxTimeMS` in milliseconds. `None` uses `MongoDb`'s built-in default.
     #[serde(default)]
     pub query_timeout_ms: Option<u64>,
+    #[serde(flatten)]
+    pub safety: SafetyConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -47,6 +86,8 @@ pub struct RedisConfig {
     pub url: String,
     #[serde(default)]
     pub allow_literal_password: bool,
+    #[serde(flatten)]
+    pub safety: SafetyConfig,
 }
 
 impl Config {
@@ -112,8 +153,47 @@ impl Config {
             }
         }
 
+        validate_safety(&config)?;
+
         Ok(config)
     }
+}
+
+fn validate_safety(config: &Config) -> Result<(), String> {
+    let check = |name: &str, s: &SafetyConfig| -> Result<(), String> {
+        if let Some(n) = s.max_calls_per_minute {
+            if n == 0 {
+                return Err(format!(
+                    "database '{name}': max_calls_per_minute must be >= 1 when set"
+                ));
+            }
+        }
+        if let Some(n) = s.max_rows_per_minute {
+            if n == 0 {
+                return Err(format!(
+                    "database '{name}': max_rows_per_minute must be >= 1 when set"
+                ));
+            }
+        }
+        if let Some(n) = s.max_response_bytes {
+            if n < 64 {
+                return Err(format!(
+                    "database '{name}': max_response_bytes must be >= 64 when set"
+                ));
+            }
+        }
+        Ok(())
+    };
+    for db in &config.database {
+        check(&db.name, &db.safety)?;
+    }
+    for m in &config.mongo {
+        check(&m.name, &m.safety)?;
+    }
+    for r in &config.redis {
+        check(&r.name, &r.safety)?;
+    }
+    Ok(())
 }
 
 /// Rejects a connection string that embeds a literal (non-`${VAR}`) password.

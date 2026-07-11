@@ -12,6 +12,14 @@ All notable changes to this project are documented here.
 - Phase 1 agent DX: `list_targets`, `list_objects`, `describe_object`, `sample_object`
 - MCP query tools default to structured JSON (`format: "table"` for ASCII)
 - MCP Resources: `peekdb://{target}/schema` and `…/tables|collections/{name}`
+- Phase 2 safety: optional allowlists, rate limits, max_response_bytes, redact_columns/patterns
+- Recursive Mongo pipeline walk blocks nested `$out`/`$merge` (e.g. under `$facet` / `$lookup`)
+- `peekdb audit` CLI to filter JSONL by target/outcome/blocked
+- Audit events include `redacted` when PII redaction ran
+
+### Security
+
+- Nested aggregation write stages are no longer a known gap
 
 ## [0.1.0] - 2026-07-11
 
