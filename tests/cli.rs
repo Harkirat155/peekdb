@@ -87,6 +87,51 @@ fn repl_and_explore_help_exist() {
 }
 
 #[test]
+fn doctor_help_and_missing_config_fail_offline() {
+    bin()
+        .args(["doctor", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("config"));
+    let tmp = tempfile::tempdir().unwrap();
+    bin()
+        .current_dir(tmp.path())
+        .env_remove("PEEKDB_CONFIG")
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("xdg"))
+        .args(["doctor"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No config found").or(predicate::str::contains("config")));
+}
+
+#[test]
+fn all_surface_helps_succeed() {
+    for cmd in [
+        "serve",
+        "query",
+        "mongo",
+        "redis",
+        "init",
+        "doctor",
+        "mcp-snippet",
+        "completions",
+        "audit",
+        "repl",
+        "explore",
+        "fav",
+    ] {
+        bin()
+            .args([cmd, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(cmd).or(predicate::str::contains("Usage")));
+    }
+    bin().args(["config", "list", "--help"]).assert().success();
+    bin().args(["fav", "list", "--help"]).assert().success();
+}
+
+#[test]
 fn query_invalid_format_fails_offline() {
     let mut f = tempfile::NamedTempFile::new().unwrap();
     f.write_all(

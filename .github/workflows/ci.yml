@@ -1,9 +1,14 @@
 name: CI
 
+# Every commit on every branch + all PRs. Full offline suite + real Docker services.
 on:
   push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,8 +23,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy (all targets, all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   test-unit:
     name: unit + CLI tests (offline)
@@ -28,11 +35,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --lib --bins
-      - run: cargo test --test cli
+      - name: unit tests (lib + bins)
+        run: cargo test --lib --bins -- --nocapture
+      - name: CLI black-box tests
+        run: cargo test --test cli -- --nocapture
 
   test-integration:
-    name: integration tests (real Postgres/Mongo/Redis containers)
+    name: integration + Docker (Postgres/Mongo/Redis)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -47,7 +56,7 @@ jobs:
           --health-cmd "pg_isready -U testuser -d testdb"
           --health-interval 2s
           --health-timeout 3s
-          --health-retries 20
+          --health-retries 30
       mongo:
         image: mongo:7
         ports:
@@ -56,7 +65,7 @@ jobs:
           --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'"
           --health-interval 2s
           --health-timeout 3s
-          --health-retries 20
+          --health-retries 30
       redis:
         image: redis:7
         ports:
@@ -65,9 +74,60 @@ jobs:
           --health-cmd "redis-cli ping"
           --health-interval 2s
           --health-timeout 3s
-          --health-retries 20
+          --health-retries 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --test integration_postgres --test integration_mongo --test integration_redis --test integration_mcp_serve --test integration_phase2_3 -- --ignored --test-threads=1
+      - name: Wait for services
+        run: |
+          set -e
+          for i in $(seq 1 30); do
+            pg_isready -h 127.0.0.1 -p 55432 -U testuser -d testdb && break
+            sleep 1
+          done
+          for i in $(seq 1 30); do
+            redis-cli -h 127.0.0.1 -p 56379 ping | grep -q PONG && break
+            sleep 1
+          done
+          # mongo: try mongosh if present, else sleep for service health
+          for i in $(seq 1 30); do
+            if command -v mongosh >/dev/null 2>&1; then
+              mongosh --quiet --host 127.0.0.1 --port 57017 --eval 'db.adminCommand("ping")' && break
+            else
+              # service healthcheck already ran; brief settle
+              sleep 1
+              break
+            fi
+            sleep 1
+          done
+      - name: Integration — core backends
+        run: |
+          cargo test \
+            --test integration_postgres \
+            --test integration_mongo \
+            --test integration_redis \
+            -- --ignored --test-threads=1 --nocapture
+      - name: Integration — MCP + Phase 2/3 + all surfaces
+        run: |
+          cargo test \
+            --test integration_mcp_serve \
+            --test integration_phase2_3 \
+            --test integration_surfaces \
+            -- --ignored --test-threads=1 --nocapture
+
+  test-docs:
+    name: landing page build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - run: npm ci
+      - run: npm run build
