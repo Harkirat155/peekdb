@@ -32,7 +32,7 @@ jobs:
       - run: cargo test --test cli
 
   test-integration:
-    name: integration tests (real Postgres/Mongo containers)
+    name: integration tests (real Postgres/Mongo/Redis containers)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -57,9 +57,17 @@ jobs:
           --health-interval 2s
           --health-timeout 3s
           --health-retries 20
-      # redis: added once the Redis backend lands — same pattern, one more block.
+      redis:
+        image: redis:7
+        ports:
+          - 56379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --test integration_postgres --test integration_mongo --test integration_mcp_serve -- --ignored --test-threads=1
+      - run: cargo test --test integration_postgres --test integration_mongo --test integration_redis --test integration_mcp_serve -- --ignored --test-threads=1

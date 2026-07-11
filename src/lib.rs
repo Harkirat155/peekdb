@@ -4,12 +4,13 @@ pub mod config;
 pub mod db;
 pub mod server;
 
-use audit::{AuditLog, AuditedDatabase, AuditedMongo};
+use audit::{AuditLog, AuditedDatabase, AuditedMongo, AuditedRedis};
 use clap::{Parser, Subcommand};
-use config::{interpolate_env, Config, DatabaseConfig, MongoConfig};
+use config::{interpolate_env, Config, DatabaseConfig, MongoConfig, RedisConfig};
 use db::mongo::MongoDb;
 use db::postgres::PostgresDb;
-use db::traits::{Database, MongoDatabase, MongoOperation, MongoQuery};
+use db::redis::RedisDb;
+use db::traits::{Database, MongoDatabase, MongoOperation, MongoQuery, RedisDatabase, RedisQuery};
 use mongodb::options::ClientOptions;
 use std::collections::HashMap;
 use std::io::Read;
@@ -39,6 +40,8 @@ enum Command {
     Query(QueryArgs),
     /// Execute a MongoDB query and print results
     Mongo(MongoArgs),
+    /// Execute a Redis command and print results
+    Redis(RedisArgs),
 }
 
 // ── Serve sub-command (original behaviour) ────────────────────────────────────
@@ -165,6 +168,41 @@ struct MongoArgs {
     no_audit_log: bool,
 }
 
+// ── Redis sub-command ─────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct RedisArgs {
+    /// Path to databases.toml
+    #[arg(long)]
+    config: std::path::PathBuf,
+
+    /// Redis instance name from config (can omit if only one is configured)
+    #[arg(long)]
+    db: Option<String>,
+
+    /// Redis command to execute, e.g. GET, HGETALL, SMEMBERS (read-only commands only)
+    command: String,
+
+    /// Arguments to the command, in order (e.g. `redis --config c.toml HGET myhash field`)
+    args: Vec<String>,
+
+    /// Max items to display for list/set/hash-like results
+    #[arg(long, default_value = "100")]
+    limit: usize,
+
+    /// Output as a JSON array instead of pretty-printed values
+    #[arg(long)]
+    json: bool,
+
+    /// Path to the audit log (JSON Lines). Defaults to <config-dir>/audit.jsonl.
+    #[arg(long, env = "MCP_AUDIT_LOG")]
+    audit_log: Option<PathBuf>,
+
+    /// Disable audit logging entirely for this run.
+    #[arg(long, default_value_t = false)]
+    no_audit_log: bool,
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Runs the full CLI: tracing init, arg parsing (with the legacy-serve-default shim),
@@ -184,6 +222,7 @@ pub async fn run() {
         Command::Serve(a) => run_serve(a).await,
         Command::Query(a) => run_query(a).await,
         Command::Mongo(a) => run_mongo(a).await,
+        Command::Redis(a) => run_redis(a).await,
     }
 }
 
@@ -193,7 +232,7 @@ pub async fn run() {
 /// DATABASE_URL only via `env`, with no `args` at all) — those must default to
 /// `serve` too, not fall through to clap's "missing subcommand" error.
 fn inject_serve_default(mut args: Vec<String>) -> Vec<String> {
-    const SUBCOMMANDS: &[&str] = &["serve", "query", "mongo"];
+    const SUBCOMMANDS: &[&str] = &["serve", "query", "mongo", "redis"];
     const PASSTHROUGH: &[&str] = &["--help", "-h", "--version", "-V"];
 
     match args.get(1).map(|s| s.as_str()) {
@@ -229,7 +268,7 @@ mod inject_serve_default_tests {
 
     #[test]
     fn known_subcommand_first_is_untouched() {
-        for sub in ["serve", "query", "mongo"] {
+        for sub in ["serve", "query", "mongo", "redis"] {
             assert_eq!(inject_serve_default(v(&["bin", sub])), v(&["bin", sub]));
         }
     }
@@ -287,6 +326,10 @@ fn new_mongo_db(cfg: &MongoConfig, uri: String, dbname: String) -> MongoDb {
     }
 }
 
+fn new_redis_db(cfg: &RedisConfig, url: String) -> RedisDb {
+    RedisDb::new(&cfg.name, url)
+}
+
 async fn build_pg_databases(
     path: &Path,
     source: &'static str,
@@ -335,6 +378,26 @@ async fn build_mongo_databases(
         let db = match audit {
             Some(log) => Arc::new(AuditedMongo::new(db, cfg.name.clone(), source, log.clone()))
                 as Arc<dyn MongoDatabase>,
+            None => db,
+        };
+        dbs.insert(cfg.name.clone(), db);
+    }
+    dbs
+}
+
+async fn build_redis_databases(
+    path: &Path,
+    source: &'static str,
+    audit: &Option<Arc<AuditLog>>,
+) -> HashMap<String, Arc<dyn RedisDatabase>> {
+    let config = load_config(path);
+    let mut dbs: HashMap<String, Arc<dyn RedisDatabase>> = HashMap::new();
+    for cfg in config.redis {
+        let url = resolve_url(&cfg.name, &cfg.url);
+        let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url));
+        let db = match audit {
+            Some(log) => Arc::new(AuditedRedis::new(db, cfg.name.clone(), source, log.clone()))
+                as Arc<dyn RedisDatabase>,
             None => db,
         };
         dbs.insert(cfg.name.clone(), db);
@@ -408,11 +471,36 @@ fn pick_mongo(
     })
 }
 
+/// Redis counterpart of `pick_pg` — see its docs.
+fn pick_redis(
+    databases: &HashMap<String, Arc<dyn RedisDatabase>>,
+    requested: &Option<String>,
+) -> Result<Arc<dyn RedisDatabase>, String> {
+    let names: Vec<&str> = databases.keys().map(|s| s.as_str()).collect();
+    let name = match requested {
+        Some(n) => n.as_str(),
+        None if names.len() == 1 => names[0],
+        None => {
+            return Err(format!(
+                "Multiple Redis instances — specify one with --db. Available: {}",
+                names.join(", ")
+            ));
+        }
+    };
+    databases.get(name).cloned().ok_or_else(|| {
+        format!(
+            "Unknown redis instance '{}'. Available: {}",
+            name,
+            databases.keys().cloned().collect::<Vec<_>>().join(", ")
+        )
+    })
+}
+
 #[cfg(test)]
 mod pick_tests {
     use super::*;
     use async_trait::async_trait;
-    use db::traits::{DbError, MongoResult, QueryResult};
+    use db::traits::{DbError, MongoResult, QueryResult, RedisResult};
 
     struct StubDb;
     #[async_trait]
@@ -434,6 +522,14 @@ mod pick_tests {
         }
     }
 
+    struct StubRedis;
+    #[async_trait]
+    impl RedisDatabase for StubRedis {
+        async fn execute_redis(&self, _query: RedisQuery) -> Result<RedisResult, DbError> {
+            unimplemented!()
+        }
+    }
+
     fn pg_map(names: &[&str]) -> HashMap<String, Arc<dyn Database>> {
         names
             .iter()
@@ -445,6 +541,13 @@ mod pick_tests {
         names
             .iter()
             .map(|n| (n.to_string(), Arc::new(StubMongo) as Arc<dyn MongoDatabase>))
+            .collect()
+    }
+
+    fn redis_map(names: &[&str]) -> HashMap<String, Arc<dyn RedisDatabase>> {
+        names
+            .iter()
+            .map(|n| (n.to_string(), Arc::new(StubRedis) as Arc<dyn RedisDatabase>))
             .collect()
     }
 
@@ -480,6 +583,19 @@ mod pick_tests {
         let err = pick_mongo(&dbs, &Some("b".to_string())).err().unwrap();
         assert!(err.contains("Unknown mongo database 'b'"));
     }
+
+    #[test]
+    fn pick_redis_autopicks_sole_instance() {
+        let dbs = redis_map(&["only"]);
+        assert!(pick_redis(&dbs, &None).is_ok());
+    }
+
+    #[test]
+    fn pick_redis_rejects_unknown_name() {
+        let dbs = redis_map(&["a"]);
+        let err = pick_redis(&dbs, &Some("b".to_string())).err().unwrap();
+        assert!(err.contains("Unknown redis instance 'b'"));
+    }
 }
 
 // ── Sub-command handlers ──────────────────────────────────────────────────────
@@ -490,13 +606,13 @@ async fn run_serve(args: ServeArgs) {
         std::process::exit(1);
     }
 
-    let (pg_configs, mongo_configs) = match (&args.config, &args.database_url) {
+    let (pg_configs, mongo_configs, redis_configs) = match (&args.config, &args.database_url) {
         (Some(path), None) => {
             let c = Config::from_file(path).unwrap_or_else(|e| {
                 eprintln!("Fatal: {}", e);
                 std::process::exit(1);
             });
-            (c.database, c.mongo)
+            (c.database, c.mongo, c.redis)
         }
         (None, Some(url)) => (
             vec![DatabaseConfig {
@@ -506,6 +622,7 @@ async fn run_serve(args: ServeArgs) {
                 allow_literal_password: true,
                 statement_timeout_ms: None,
             }],
+            vec![],
             vec![],
         ),
         (Some(_), Some(_)) => {
@@ -558,7 +675,19 @@ async fn run_serve(args: ServeArgs) {
         mongo_databases.insert(cfg.name.clone(), db);
     }
 
-    server::run(databases, mongo_databases, args.max_rows).await;
+    let mut redis_databases: HashMap<String, Arc<dyn RedisDatabase>> = HashMap::new();
+    for cfg in redis_configs {
+        let url = resolve_url(&cfg.name, &cfg.url);
+        let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url));
+        let db = match &audit {
+            Some(log) => Arc::new(AuditedRedis::new(db, cfg.name.clone(), "mcp", log.clone()))
+                as Arc<dyn RedisDatabase>,
+            None => db,
+        };
+        redis_databases.insert(cfg.name.clone(), db);
+    }
+
+    server::run(databases, mongo_databases, redis_databases, args.max_rows).await;
 }
 
 async fn run_query(args: QueryArgs) {
@@ -628,6 +757,31 @@ async fn run_mongo(args: MongoArgs) {
 
     match db.execute_mongo(query).await {
         Ok(result) => cli::print_mongo_result(&result, args.json),
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run_redis(args: RedisArgs) {
+    let query = RedisQuery {
+        command: args.command,
+        args: args.args,
+        limit: args.limit,
+    };
+
+    let audit_path = resolve_audit_log_path(Some(&args.config), &args.audit_log, args.no_audit_log);
+    let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
+
+    let databases = build_redis_databases(&args.config, "cli", &audit).await;
+    let db = pick_redis(&databases, &args.db).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    });
+
+    match db.execute_redis(query).await {
+        Ok(result) => cli::print_redis_result(&result, args.json),
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);

@@ -18,6 +18,7 @@ fn help_flag_succeeds() {
         .success()
         .stdout(predicate::str::contains("query"))
         .stdout(predicate::str::contains("mongo"))
+        .stdout(predicate::str::contains("redis"))
         .stdout(predicate::str::contains("serve"));
 }
 
@@ -42,6 +43,42 @@ fn mongo_help_succeeds() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--operation"));
+}
+
+#[test]
+fn redis_help_succeeds() {
+    bin()
+        .args(["redis", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("COMMAND"));
+}
+
+#[test]
+fn redis_disallowed_command_is_rejected_without_needing_a_live_server() {
+    // check_allowed_redis runs before the connection attempt, so this doesn't need a
+    // live Redis — same shape as the Postgres/Mongo "no live DB needed" CLI tests.
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    f.write_all(
+        br#"
+        [[redis]]
+        name = "only-one"
+        url = "redis://localhost:1"
+        "#,
+    )
+    .unwrap();
+    bin()
+        .args([
+            "redis",
+            "--config",
+            f.path().to_str().unwrap(),
+            "SET",
+            "foo",
+            "bar",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Blocked"));
 }
 
 #[test]
@@ -97,9 +134,8 @@ fn query_empty_config_fails_with_clear_error() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "no [[database]] or [[mongo]] entries",
-        ));
+        .stderr(predicate::str::contains("no [[database]]"))
+        .stderr(predicate::str::contains("[[redis]]"));
 }
 
 #[test]

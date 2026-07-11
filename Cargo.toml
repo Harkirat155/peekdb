@@ -25,6 +25,7 @@ toml = "0.8"
 mongodb = { version = "2.8", features = ["tokio-runtime"] }
 futures = "0.3"
 time = { version = "0.3", features = ["formatting"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -33,4 +34,4 @@ predicates = "3"
 
 [features]
 default = ["tls"]
-tls = ["dep:postgres-native-tls", "dep:native-tls"]
+tls = ["dep:postgres-native-tls", "dep:native-tls", "redis/tokio-native-tls-comp"]

@@ -2,7 +2,7 @@
 
 An MCP (Model Context Protocol) server that gives AI assistants **read-only** access to your databases — with enforcement baked into the server, not left to the AI's discretion.
 
-Supports **PostgreSQL** and **MongoDB**.
+Supports **PostgreSQL**, **MongoDB**, and **Redis**.
 
 ## Why
 
@@ -18,18 +18,22 @@ When you let an AI assistant query a database, you want a hard guarantee that it
 1. **Operation whitelist** — only `find`, `aggregate`, `distinct`, `count`, `list_collections`, and `list_indexes` are accepted.
 2. **Pipeline stage blocking** — `$out` and `$merge` stages (the MongoDB equivalent of a write) are blocked in every aggregation pipeline before execution.
 
+**Redis:**
+1. **Command allowlist** — Redis has no read-only-transaction concept the way Postgres does, so this is the sole enforcement layer. Only read commands (`GET`/`MGET`, `HGET`/`HGETALL`, `SMEMBERS`, `ZRANGE`, `LRANGE`, `SCAN` family, `TTL`, `EXISTS`, `KEYS`, etc.) and a few read-only subcommands (`CONFIG GET`, `CLUSTER INFO`) are accepted; everything else — `SET`/`DEL`/`EXPIRE`/`FLUSHALL`, scripting, transactions, pub/sub, `CONFIG SET`, `SHUTDOWN`, and anything not explicitly listed — is rejected by omission.
+
 The read-only enforcement is **in the server**, not in the AI model's judgment. No prompt can override it.
 
 ## Features
 
 - **Enforced read-only** — multiple independent layers, not a "please be careful" policy
-- **PostgreSQL + MongoDB** — both database types supported in one server
-- **Multi-database** — connect to several named databases from a single TOML config; the AI picks by name
-- **Environment-variable interpolation** — `${ENV_VAR}` in connection strings; credentials never need to be in the file
-- **Configurable row limit** — default 500 rows, adjustable up to 5000
-- **ASCII table output** (SQL) and Extended JSON output (MongoDB) — clean, AI-readable results
-- **TLS support** — `native-tls` for PostgreSQL remote connections (MongoDB uses its own TLS stack)
-- **Extensible** — `Database` and `MongoDatabase` traits make adding new backends straightforward
+- **PostgreSQL + MongoDB + Redis** — three database types supported in one tool
+- **Multi-database** — connect to several named instances from a single TOML config; the AI (or you) picks by name
+- **Environment-variable interpolation** — `${ENV_VAR}` in connection strings; literal passwords in the config file are rejected at load time
+- **Audit logging** — an append-only JSON-Lines trail of every query/command, its outcome, and timing — covering both the direct-CLI and MCP paths identically
+- **Configurable row/document/value limits** — sensible defaults, adjustable per call
+- **ASCII table output** (SQL) and JSON output (Mongo/Redis) — clean, AI-readable results
+- **TLS support** — `native-tls` for PostgreSQL and Redis remote connections (MongoDB uses its own TLS stack)
+- **Extensible** — `Database`/`MongoDatabase`/`RedisDatabase` traits make adding new backends straightforward
 
 ## Installation
 
@@ -231,14 +235,15 @@ Documents are serialized as MongoDB Extended JSON (`{"$oid": "..."}` for ObjectI
 
 ## Security model
 
-| Threat | PostgreSQL mitigation | MongoDB mitigation |
-|--------|----------------------|-------------------|
-| Prompt injection write attempt | Leading-statement allowlist rejects before DB; `BEGIN TRANSACTION READ ONLY` rejects at DB regardless | Operation whitelist: only read operations accepted |
-| `SET TRANSACTION READ WRITE` escalation | `SET` isn't an allowed leading statement; PostgreSQL also blocks it inside a read-only transaction | N/A |
-| Aggregation pipeline writing to a collection | N/A | `$out` and `$merge` stages are detected and blocked before execution |
-| Statement chaining (`SET …; INSERT …`) | Single-statement enforcement: interior `;` is rejected | N/A |
-| Credential exposure | `${ENV_VAR}` interpolation; literal passwords in `databases.toml` are rejected at load time; the file itself is gitignored | Same |
-| Excessive data exposure | Row limit (default 500, max 5000) | Document limit (default 100, max 1000) |
+| Threat | PostgreSQL mitigation | MongoDB mitigation | Redis mitigation |
+|--------|----------------------|-------------------|-------------------|
+| Prompt injection write attempt | Leading-statement allowlist rejects before DB; `BEGIN TRANSACTION READ ONLY` rejects at DB regardless | Operation whitelist: only read operations accepted | Command allowlist: only read commands accepted |
+| `SET TRANSACTION READ WRITE` escalation | `SET` isn't an allowed leading statement; PostgreSQL also blocks it inside a read-only transaction | N/A | N/A |
+| Aggregation pipeline writing to a collection | N/A | `$out` and `$merge` stages are detected and blocked before execution | N/A |
+| Statement chaining (`SET …; INSERT …`) | Single-statement enforcement: interior `;` is rejected | N/A | N/A (one command per call by construction) |
+| Credential exposure | `${ENV_VAR}` interpolation; literal passwords in `databases.toml` are rejected at load time; the file itself is gitignored | Same | Same |
+| Excessive data exposure | Row limit (default 500, max 5000) | Document limit (default 100, max 1000) | Display limit (default 100, max 1000) |
+| Slow/runaway query | Server-side `statement_timeout` (default 30s) | `maxTimeMS` (default 30s) | N/A (single-command calls) |
 
 ## Extending to other databases
 

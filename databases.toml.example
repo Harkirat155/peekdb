@@ -32,3 +32,14 @@ uri  = "mongodb://user:${MONGO_PASSWORD}@localhost:27017/mydb"
 [[mongo]]
 name = "mydb-prod"
 uri  = "mongodb://user:${MONGO_PROD_PASSWORD}@mongo1.example.com:27017,mongo2.example.com:27017/mydb?authSource=admin"
+
+# ── Redis instances ─────────────────────────────────────────────────────────────
+# Use rediss:// (not redis://) for TLS.
+
+[[redis]]
+name = "cache-local"
+url  = "redis://localhost:6379"
+
+[[redis]]
+name = "cache-prod"
+url  = "rediss://:${REDIS_PROD_PASSWORD}@redis-prod.example.com:6380"

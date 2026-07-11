@@ -1,4 +1,4 @@
-use crate::db::traits::{MongoResult, QueryResult};
+use crate::db::traits::{MongoResult, QueryResult, RedisResult};
 use serde_json::Value;
 
 pub fn print_pg_result(result: &QueryResult, json_mode: bool) {
@@ -61,6 +61,33 @@ pub fn print_mongo_result(result: &MongoResult, json_mode: bool) {
 
     let suffix = if result.truncated { ", truncated" } else { "" };
     eprintln!("({} documents{})", result.count, suffix);
+}
+
+pub fn print_redis_result(result: &RedisResult, json_mode: bool) {
+    if json_mode {
+        let values: Vec<Value> = result
+            .values
+            .iter()
+            .filter_map(|s| serde_json::from_str(s).ok())
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&values).unwrap_or_default()
+        );
+    } else {
+        for v in &result.values {
+            match serde_json::from_str::<Value>(v) {
+                Ok(parsed) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&parsed).unwrap_or_default()
+                ),
+                Err(_) => println!("{}", v),
+            }
+        }
+    }
+
+    let suffix = if result.truncated { ", truncated" } else { "" };
+    eprintln!("({} value(s){})", result.count, suffix);
 }
 
 fn print_table(columns: &[String], rows: &[Vec<Option<String>>]) {

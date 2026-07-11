@@ -93,3 +93,29 @@ pub struct MongoResult {
 pub trait MongoDatabase: Send + Sync {
     async fn execute_mongo(&self, query: MongoQuery) -> Result<MongoResult, DbError>;
 }
+
+// ── Redis types ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct RedisQuery {
+    pub command: String,
+    pub args: Vec<String>,
+    /// Caps the DISPLAYED result size for commands returning a list/set/hash-like
+    /// value (e.g. SMEMBERS, HGETALL). Redis itself always executes the full command
+    /// server-side — there's no cursor to stop early on a single-command call — so
+    /// this truncates the response after the fact, the same semantics as Mongo's
+    /// `limit` on `distinct`.
+    pub limit: usize,
+}
+
+#[derive(Debug)]
+pub struct RedisResult {
+    pub values: Vec<String>,
+    pub count: usize,
+    pub truncated: bool,
+}
+
+#[async_trait]
+pub trait RedisDatabase: Send + Sync {
+    async fn execute_redis(&self, query: RedisQuery) -> Result<RedisResult, DbError>;
+}

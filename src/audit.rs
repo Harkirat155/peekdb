@@ -1,4 +1,7 @@
-use crate::db::traits::{Database, DbError, MongoDatabase, MongoQuery, MongoResult, QueryResult};
+use crate::db::traits::{
+    Database, DbError, MongoDatabase, MongoQuery, MongoResult, QueryResult, RedisDatabase,
+    RedisQuery, RedisResult,
+};
 use async_trait::async_trait;
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
@@ -203,6 +206,63 @@ impl MongoDatabase for AuditedMongo {
             timestamp: now_rfc3339(),
             source: self.source,
             backend: "mongo",
+            target: self.name.clone(),
+            operation: operation_desc,
+            outcome,
+            detail,
+            row_count,
+            duration_ms,
+            truncated,
+        });
+
+        result
+    }
+}
+
+/// Redis counterpart of `AuditedDatabase`/`AuditedMongo` — see their docs.
+pub struct AuditedRedis {
+    inner: Arc<dyn RedisDatabase>,
+    name: String,
+    source: &'static str,
+    log: Arc<AuditLog>,
+}
+
+impl AuditedRedis {
+    pub fn new(
+        inner: Arc<dyn RedisDatabase>,
+        name: impl Into<String>,
+        source: &'static str,
+        log: Arc<AuditLog>,
+    ) -> Self {
+        Self {
+            inner,
+            name: name.into(),
+            source,
+            log,
+        }
+    }
+}
+
+#[async_trait]
+impl RedisDatabase for AuditedRedis {
+    async fn execute_redis(&self, query: RedisQuery) -> Result<RedisResult, DbError> {
+        let operation_desc = format!("command={} args={:?}", query.command, query.args);
+        let start = Instant::now();
+        let result = self.inner.execute_redis(query).await;
+        let duration_ms = start.elapsed().as_millis();
+
+        let (outcome, detail, row_count, truncated) = match &result {
+            Ok(r) => ("ok", None, Some(r.count), r.truncated),
+            Err(e @ DbError::BlockedKeyword { .. }) => {
+                ("blocked", Some(e.to_string()), None, false)
+            }
+            Err(e) => ("error", Some(e.to_string()), None, false),
+        };
+
+        self.log.write(&AuditEvent {
+            timestamp: now_rfc3339(),
+            source: self.source,
+            backend: "redis",
             target: self.name.clone(),
             operation: operation_desc,
             outcome,

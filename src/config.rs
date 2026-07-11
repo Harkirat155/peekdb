@@ -8,6 +8,8 @@ pub struct Config {
     pub database: Vec<DatabaseConfig>,
     #[serde(default)]
     pub mongo: Vec<MongoConfig>,
+    #[serde(default)]
+    pub redis: Vec<RedisConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -37,6 +39,16 @@ pub struct MongoConfig {
     pub query_timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct RedisConfig {
+    pub name: String,
+    /// `redis://` for plain, `rediss://` for TLS — selected via URL scheme, not a
+    /// separate flag (unlike Postgres's `no_tls`).
+    pub url: String,
+    #[serde(default)]
+    pub allow_literal_password: bool,
+}
+
 impl Config {
     pub fn from_file(path: &Path) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path)
@@ -44,14 +56,14 @@ impl Config {
         let config: Self = toml::from_str(&raw)
             .map_err(|e| format!("Invalid config {}: {}", path.display(), e))?;
 
-        if config.database.is_empty() && config.mongo.is_empty() {
+        if config.database.is_empty() && config.mongo.is_empty() && config.redis.is_empty() {
             return Err(format!(
-                "{} contains no [[database]] or [[mongo]] entries",
+                "{} contains no [[database]], [[mongo]], or [[redis]] entries",
                 path.display()
             ));
         }
 
-        // Duplicate name detection across both postgres and mongo
+        // Duplicate name detection across postgres, mongo, and redis
         let mut seen = HashSet::new();
         for db in &config.database {
             if db.name.is_empty() {
@@ -72,6 +84,17 @@ impl Config {
                 ));
             }
         }
+        for r in &config.redis {
+            if r.name.is_empty() {
+                return Err("Redis entry has an empty name".into());
+            }
+            if !seen.insert(r.name.clone()) {
+                return Err(format!(
+                    "Duplicate name '{}' across [[database]]/[[mongo]]/[[redis]] entries",
+                    r.name
+                ));
+            }
+        }
 
         for db in &config.database {
             if !db.allow_literal_password {
@@ -81,6 +104,11 @@ impl Config {
         for m in &config.mongo {
             if !m.allow_literal_password {
                 check_no_literal_password(&m.name, &m.uri)?;
+            }
+        }
+        for r in &config.redis {
+            if !r.allow_literal_password {
+                check_no_literal_password(&r.name, &r.url)?;
             }
         }
 
@@ -280,7 +308,8 @@ mod tests {
     fn from_file_rejects_empty_config() {
         let f = write_temp_toml("");
         let err = Config::from_file(f.path()).unwrap_err();
-        assert!(err.contains("no [[database]] or [[mongo]] entries"));
+        assert!(err.contains("no [[database]]"));
+        assert!(err.contains("[[redis]]"));
     }
 
     #[test]
@@ -359,6 +388,19 @@ mod tests {
     #[test]
     fn extract_password_url_form_user_with_no_password() {
         assert_eq!(extract_password("postgres://user@host:5432/db"), None);
+    }
+
+    #[test]
+    fn extract_password_url_form_empty_username_redis_auth_style() {
+        // Redis's password-only auth URL form: redis://:PASSWORD@host (no username).
+        // Verified by hand while writing databases.toml.example — an earlier draft used
+        // "redis://PASSWORD@host" (no leading colon), which this function would have
+        // silently treated as a username with no password, letting a literal secret
+        // through validation undetected.
+        assert_eq!(
+            extract_password("redis://:hunter2@host:6379"),
+            Some("hunter2".to_string())
+        );
     }
 
     #[test]
@@ -470,5 +512,49 @@ mod tests {
             "#,
         );
         assert!(Config::from_file(f.path()).is_ok());
+    }
+
+    #[test]
+    fn from_file_accepts_a_redis_only_config() {
+        let f = write_temp_toml(
+            r#"
+            [[redis]]
+            name = "cache"
+            url = "redis://localhost:6379"
+            "#,
+        );
+        let config = Config::from_file(f.path()).unwrap();
+        assert_eq!(config.redis.len(), 1);
+        assert_eq!(config.redis[0].name, "cache");
+    }
+
+    #[test]
+    fn from_file_rejects_duplicate_name_between_redis_and_database() {
+        let f = write_temp_toml(
+            r#"
+            [[database]]
+            name = "shared"
+            url = "postgres://a"
+
+            [[redis]]
+            name = "shared"
+            url = "redis://localhost:6379"
+            "#,
+        );
+        let err = Config::from_file(f.path()).unwrap_err();
+        assert!(err.contains("Duplicate name 'shared'"));
+    }
+
+    #[test]
+    fn from_file_rejects_literal_password_in_redis_url() {
+        let f = write_temp_toml(
+            r#"
+            [[redis]]
+            name = "cache"
+            url = "redis://user:hunter2@localhost:6379"
+            "#,
+        );
+        let err = Config::from_file(f.path()).unwrap_err();
+        assert!(err.contains("literal password"));
     }
 }

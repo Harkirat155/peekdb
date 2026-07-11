@@ -1,5 +1,6 @@
 use crate::db::traits::{
-    Database, MongoDatabase, MongoOperation, MongoQuery, MongoResult, QueryResult,
+    Database, MongoDatabase, MongoOperation, MongoQuery, MongoResult, QueryResult, RedisDatabase,
+    RedisQuery, RedisResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -59,6 +60,8 @@ pub struct Server {
     db_names: Vec<String>,
     mongo_databases: HashMap<String, Arc<dyn MongoDatabase>>,
     mongo_names: Vec<String>,
+    redis_databases: HashMap<String, Arc<dyn RedisDatabase>>,
+    redis_names: Vec<String>,
     default_max_rows: usize,
 }
 
@@ -66,17 +69,22 @@ impl Server {
     pub fn new(
         databases: HashMap<String, Arc<dyn Database>>,
         mongo_databases: HashMap<String, Arc<dyn MongoDatabase>>,
+        redis_databases: HashMap<String, Arc<dyn RedisDatabase>>,
         default_max_rows: usize,
     ) -> Self {
         let mut db_names: Vec<String> = databases.keys().cloned().collect();
         db_names.sort();
         let mut mongo_names: Vec<String> = mongo_databases.keys().cloned().collect();
         mongo_names.sort();
+        let mut redis_names: Vec<String> = redis_databases.keys().cloned().collect();
+        redis_names.sort();
         Self {
             databases,
             db_names,
             mongo_databases,
             mongo_names,
+            redis_databases,
+            redis_names,
             default_max_rows,
         }
     }
@@ -117,6 +125,26 @@ impl Server {
                 "Unknown MongoDB database '{}'. Available: {}",
                 name,
                 self.mongo_names.join(", ")
+            )
+        })
+    }
+
+    fn resolve_redis(&self, requested: Option<&str>) -> Result<Arc<dyn RedisDatabase>, String> {
+        let name = match requested {
+            Some(n) => n,
+            None if self.redis_names.len() == 1 => &self.redis_names[0],
+            None => {
+                return Err(format!(
+                    "No 'database' specified. Available Redis instances: {}",
+                    self.redis_names.join(", ")
+                ))
+            }
+        };
+        self.redis_databases.get(name).cloned().ok_or_else(|| {
+            format!(
+                "Unknown Redis instance '{}'. Available: {}",
+                name,
+                self.redis_names.join(", ")
             )
         })
     }
@@ -171,9 +199,15 @@ async fn write_message(stdout: &mut tokio::io::Stdout, json: &str) -> std::io::R
 pub async fn run(
     databases: HashMap<String, Arc<dyn Database>>,
     mongo_databases: HashMap<String, Arc<dyn MongoDatabase>>,
+    redis_databases: HashMap<String, Arc<dyn RedisDatabase>>,
     default_max_rows: usize,
 ) {
-    let server = Arc::new(Server::new(databases, mongo_databases, default_max_rows));
+    let server = Arc::new(Server::new(
+        databases,
+        mongo_databases,
+        redis_databases,
+        default_max_rows,
+    ));
     let mut reader = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
 
@@ -183,6 +217,9 @@ pub async fn run(
     }
     if !server.mongo_names.is_empty() {
         summary.push(format!("Mongo: {}", server.mongo_names.join(", ")));
+    }
+    if !server.redis_names.is_empty() {
+        summary.push(format!("Redis: {}", server.redis_names.join(", ")));
     }
     info!("MCP server ready — {}", summary.join(" | "));
 
@@ -394,6 +431,66 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
         }));
     }
 
+    // redis_query tool — only if Redis instances are configured
+    if !server.redis_names.is_empty() {
+        let multi_redis = server.redis_names.len() > 1;
+        let mut props = json!({
+            "command": {
+                "type": "string",
+                "description": "Redis command to execute, e.g. GET, HGETALL, SMEMBERS (read-only commands only)"
+            },
+            "args": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Arguments to the command, in order (e.g. [\"mykey\"] for GET, [\"myhash\", \"field\"] for HGET)"
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max items to display for list/set/hash-like results (default 100, max 1000)",
+                "minimum": 1,
+                "maximum": 1000
+            }
+        });
+        if multi_redis {
+            props["database"] = json!({
+                "type": "string",
+                "description": format!("Target Redis instance. Available: {}", server.redis_names.join(", ")),
+                "enum": server.redis_names
+            });
+        } else {
+            props["database"] = json!({
+                "type": "string",
+                "description": format!("Redis instance (only '{}' is configured)", server.redis_names[0]),
+                "enum": server.redis_names,
+                "default": server.redis_names[0]
+            });
+        }
+        let required: Value = if multi_redis {
+            json!(["command", "database"])
+        } else {
+            json!(["command"])
+        };
+        let redis_list = server.redis_names.join(", ");
+        tools.push(json!({
+            "name": "redis_query",
+            "description": format!(
+                "Execute a read-only Redis command.\n\
+                 Instances: {redis_list}\n\n\
+                 Allowed: GET/MGET, HGET/HGETALL/HKEYS/HVALS, LRANGE/LLEN, SMEMBERS/SISMEMBER, \
+                 ZRANGE/ZSCORE, SCAN family, TYPE, TTL, EXISTS, KEYS, and a few read-only \
+                 subcommands (CONFIG GET, CLUSTER INFO, etc.).\n\
+                 Blocked by omission: SET/DEL/EXPIRE/FLUSHALL, scripting (EVAL/FUNCTION), \
+                 transactions (MULTI/EXEC), pub/sub, CONFIG SET, ACL, SHUTDOWN, and anything \
+                 else not explicitly allowlisted."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": props,
+                "required": required
+            }
+        }));
+    }
+
     JsonRpcResponse::ok(id, json!({ "tools": tools }))
 }
 
@@ -404,6 +501,7 @@ async fn handle_tools_call(id: Value, params: Value, server: &Arc<Server>) -> Js
     match tool_name {
         "sql_query" => handle_sql_query(id, args, server).await,
         "mongo_query" => handle_mongo_query(id, args, server).await,
+        "redis_query" => handle_redis_query(id, args, server).await,
         other => JsonRpcResponse::ok(
             id,
             json!({
@@ -549,6 +647,74 @@ async fn handle_mongo_query(id: Value, args: Value, server: &Arc<Server>) -> Jso
     }
 }
 
+async fn handle_redis_query(id: Value, args: Value, server: &Arc<Server>) -> JsonRpcResponse {
+    let command = match args.get("command").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => {
+            return JsonRpcResponse::ok(
+                id,
+                json!({
+                    "content": [{"type": "text", "text": "Error: 'command' is required and must be non-empty"}],
+                    "isError": true
+                }),
+            )
+        }
+    };
+
+    let db_name = args.get("database").and_then(|v| v.as_str());
+    let db = match server.resolve_redis(db_name) {
+        Ok(db) => db,
+        Err(msg) => {
+            return JsonRpcResponse::ok(
+                id,
+                json!({
+                    "content": [{"type": "text", "text": format!("Error: {}", msg)}],
+                    "isError": true
+                }),
+            )
+        }
+    };
+
+    let cmd_args: Vec<String> = args
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as usize).min(1000))
+        .unwrap_or(100);
+
+    let query = RedisQuery {
+        command,
+        args: cmd_args,
+        limit,
+    };
+
+    match db.execute_redis(query).await {
+        Ok(result) => JsonRpcResponse::ok(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format_redis_result(&result)}]
+            }),
+        ),
+        Err(e) => JsonRpcResponse::ok(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format!("Error: {}", e)}],
+                "isError": true
+            }),
+        ),
+    }
+}
+
 fn format_mongo_result(result: &MongoResult) -> String {
     if result.documents.is_empty() {
         return "0 documents".to_string();
@@ -564,6 +730,25 @@ fn format_mongo_result(result: &MongoResult) -> String {
         ));
     } else {
         out.push_str(&format!("\n{} document(s)\n", result.count));
+    }
+    out
+}
+
+fn format_redis_result(result: &RedisResult) -> String {
+    if result.values.is_empty() {
+        return "(nil)".to_string();
+    }
+    let mut out = String::new();
+    for (i, v) in result.values.iter().enumerate() {
+        out.push_str(&format!("[{}] {}\n", i + 1, v));
+    }
+    if result.truncated {
+        out.push_str(&format!(
+            "\n{} value(s) shown (truncated — increase limit up to 1000)\n",
+            result.count
+        ));
+    } else {
+        out.push_str(&format!("\n{} value(s)\n", result.count));
     }
     out
 }

@@ -14,6 +14,7 @@ use std::process::{Command, Stdio};
 const PG_URL: &str = "host=localhost port=55432 user=testuser password=testpass dbname=testdb";
 const MONGO_URI: &str = "mongodb://localhost:57017";
 const MONGO_DB: &str = "testdb";
+const REDIS_URL: &str = "redis://localhost:56379";
 
 fn seed_data() {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -39,6 +40,15 @@ fn seed_data() {
             .collection::<mongodb::bson::Document>("widgets");
         coll.drop(None).await.ok();
         coll.insert_many(vec![mongodb::bson::doc! {"name": "alpha"}], None)
+            .await
+            .unwrap();
+
+        let rclient = redis::Client::open(REDIS_URL).unwrap();
+        let mut rconn = rclient.get_connection_manager().await.unwrap();
+        let _: () = redis::cmd("SET")
+            .arg("widgets:alpha")
+            .arg("1")
+            .query_async(&mut rconn)
             .await
             .unwrap();
     });
@@ -86,6 +96,10 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
         [[mongo]]
         name = "mg"
         uri = "mongodb://localhost:57017/testdb"
+
+        [[redis]]
+        name = "rd"
+        url = "redis://localhost:56379"
         "#
     )
     .unwrap();
@@ -131,6 +145,7 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
         .collect();
     assert!(tools.contains(&"sql_query".to_string()));
     assert!(tools.contains(&"mongo_query".to_string()));
+    assert!(tools.contains(&"redis_query".to_string()));
 
     // Allowed SQL query succeeds over MCP, same as the direct `query` subcommand.
     send_frame(
@@ -191,25 +206,54 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
     let resp = read_frame(&mut reader);
     assert_eq!(resp["result"]["isError"], json!(true));
 
+    // Allowed redis GET succeeds over MCP.
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": "redis_query", "arguments": {"command": "GET", "args": ["widgets:alpha"]}}
+        }),
+    );
+    let resp = read_frame(&mut reader);
+    assert_ne!(resp["result"]["isError"], json!(true));
+    assert!(resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains('1'));
+
+    // Blocked redis SET is rejected via the MCP path too.
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {"name": "redis_query", "arguments": {"command": "SET", "args": ["widgets:alpha", "tampered"]}}
+        }),
+    );
+    let resp = read_frame(&mut reader);
+    assert_eq!(resp["result"]["isError"], json!(true));
+
     drop(stdin); // EOF on stdin — server should shut down cleanly.
     let status = child.wait().expect("wait for server to exit");
     assert!(status.success());
 
     // Audit logging must cover the MCP path identically to the CLI path: one line per
-    // call (4 tools/call requests above), source "mcp", both blocked calls recorded, and
+    // call (6 tools/call requests above), source "mcp", all blocked calls recorded, and
     // never a connection string/password anywhere in the file.
     let contents = std::fs::read_to_string(&audit_path).expect("audit log was written");
     let lines: Vec<serde_json::Value> = contents
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 4, "expected one audit line per tools/call");
+    assert_eq!(lines.len(), 6, "expected one audit line per tools/call");
     assert!(lines.iter().all(|l| l["source"] == "mcp"));
     let outcomes: Vec<&str> = lines
         .iter()
         .map(|l| l["outcome"].as_str().unwrap())
         .collect();
-    assert_eq!(outcomes, vec!["ok", "blocked", "ok", "blocked"]);
+    assert_eq!(
+        outcomes,
+        vec!["ok", "blocked", "ok", "blocked", "ok", "blocked"]
+    );
     assert!(!contents.contains("testpass"));
     assert!(!contents.contains("host=localhost"));
 }
