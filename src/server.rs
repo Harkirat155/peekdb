@@ -287,7 +287,7 @@ fn handle_initialize(id: Value) -> JsonRpcResponse {
             "protocolVersion": "2024-11-05",
             "capabilities": { "tools": {} },
             "serverInfo": {
-                "name": "mcp-db-readonly",
+                "name": "peekdb",
                 "version": env!("CARGO_PKG_VERSION")
             }
         }),

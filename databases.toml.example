@@ -1,4 +1,4 @@
-# mcp-db-readonly database config
+# peekdb database config
 # Copy to databases.toml and fill in your connection details.
 # databases.toml is gitignored — never commit real credentials.
 #

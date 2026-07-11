@@ -22,8 +22,8 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "mcp-db-readonly",
-    about = "Read-only database access — MCP server (serve) or direct CLI queries (query / mongo).\n\
+    name = "peekdb",
+    about = "Read-only database access — direct CLI queries (query / mongo / redis) or MCP server (serve).\n\
              Running with no subcommand (or --config alone) defaults to 'serve' for backwards compatibility.",
     version
 )]

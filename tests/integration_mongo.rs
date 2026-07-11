@@ -6,10 +6,10 @@
 //! (single-threaded: tests share one `widgets` collection and reseed it, so they must
 //! not interleave).
 
-use mcp_db_readonly::db::mongo::MongoDb;
-use mcp_db_readonly::db::traits::{DbError, MongoDatabase, MongoOperation, MongoQuery};
 use mongodb::bson::{doc, Document};
 use mongodb::Client;
+use peekdb::db::mongo::MongoDb;
+use peekdb::db::traits::{DbError, MongoDatabase, MongoOperation, MongoQuery};
 
 const MONGO_URI: &str = "mongodb://localhost:57017";
 const MONGO_DB: &str = "testdb";

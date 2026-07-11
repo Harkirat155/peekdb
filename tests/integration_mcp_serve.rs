@@ -107,7 +107,7 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
     let audit_dir = tempfile::tempdir().unwrap();
     let audit_path = audit_dir.path().join("audit.jsonl");
 
-    let bin = env!("CARGO_BIN_EXE_mcp-db-readonly");
+    let bin = env!("CARGO_BIN_EXE_peekdb");
     let mut child = Command::new(bin)
         .args([
             "serve",
@@ -120,7 +120,7 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn mcp-db-readonly serve");
+        .expect("spawn peekdb serve");
 
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());

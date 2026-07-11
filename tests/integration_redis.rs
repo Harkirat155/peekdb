@@ -6,8 +6,8 @@
 //! (single-threaded: tests share one keyspace and reseed it via FLUSHDB, so they must
 //! not interleave).
 
-use mcp_db_readonly::db::redis::RedisDb;
-use mcp_db_readonly::db::traits::{DbError, RedisDatabase, RedisQuery};
+use peekdb::db::redis::RedisDb;
+use peekdb::db::traits::{DbError, RedisDatabase, RedisQuery};
 
 const REDIS_URL: &str = "redis://localhost:56379";
 

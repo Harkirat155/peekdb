@@ -6,8 +6,8 @@
 //! (single-threaded: tests share one `widgets` table and reseed it, so they must not
 //! interleave).
 
-use mcp_db_readonly::db::postgres::PostgresDb;
-use mcp_db_readonly::db::traits::{Database, DbError};
+use peekdb::db::postgres::PostgresDb;
+use peekdb::db::traits::{Database, DbError};
 
 const PG_URL: &str = "host=localhost port=55432 user=testuser password=testpass dbname=testdb";
 
@@ -168,8 +168,8 @@ async fn non_ascii_result_does_not_panic_when_printed() {
         .await
         .unwrap();
     assert_eq!(result.row_count, 1);
-    mcp_db_readonly::cli::print_pg_result(&result, false);
-    mcp_db_readonly::cli::print_pg_result(&result, true);
+    peekdb::cli::print_pg_result(&result, false);
+    peekdb::cli::print_pg_result(&result, true);
 }
 
 #[tokio::test]
