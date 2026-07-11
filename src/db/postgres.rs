@@ -1,5 +1,9 @@
 use super::traits::{Database, DbError, QueryResult};
+use crate::policy::{
+    cap_query_result_bytes, check_sql_allowlist, redact_query_result, RateLimiter, TargetPolicy,
+};
 use async_trait::async_trait;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_postgres::{NoTls, SimpleQueryMessage};
 use tracing::{debug, error, info, warn};
@@ -54,6 +58,8 @@ pub struct PostgresDb {
     statement_timeout_ms: u64,
     // None = not yet connected (or connection was dropped)
     client: Mutex<Option<tokio_postgres::Client>>,
+    policy: TargetPolicy,
+    rate: Option<Arc<RateLimiter>>,
 }
 
 impl PostgresDb {
@@ -65,16 +71,27 @@ impl PostgresDb {
             no_tls,
             statement_timeout_ms: DEFAULT_STATEMENT_TIMEOUT_MS,
             client: Mutex::new(None),
+            policy: TargetPolicy::default(),
+            rate: None,
         }
     }
 
     /// Overrides the default 30s server-side `statement_timeout` for this connection —
     /// guards against a runaway/looping agent hammering a database with an expensive
-    /// query. This is a control on query duration, not on call frequency; rate limiting
-    /// (call frequency) is a separate, deliberately deferred concern (see the roadmap).
+    /// query. Call-frequency limits are applied via [`Self::with_safety`].
     pub fn with_statement_timeout_ms(mut self, ms: u64) -> Self {
         self.statement_timeout_ms = ms;
         self
+    }
+
+    pub fn with_safety(mut self, policy: TargetPolicy, rate: Option<Arc<RateLimiter>>) -> Self {
+        self.policy = policy;
+        self.rate = rate;
+        self
+    }
+
+    pub fn allowlist(&self) -> &crate::policy::ObjectAllowlist {
+        &self.policy.allow_objects
     }
 
     async fn ensure_connected(
@@ -241,6 +258,10 @@ fn strip_leading_explain(sql: &str) -> &str {
 
 #[async_trait]
 impl Database for PostgresDb {
+    fn check_object_access(&self, name: &str) -> Result<(), DbError> {
+        self.policy.allow_objects.check(name)
+    }
+
     async fn execute_query(&self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
         // Strip a single trailing semicolon, then reject any interior semicolons.
         // One statement per call: prevents chaining (e.g. "SET ...; INSERT ...").
@@ -253,6 +274,11 @@ impl Database for PostgresDb {
         }
 
         Self::check_allowed(sql)?;
+        check_sql_allowlist(sql, &self.policy.allow_objects)?;
+        if let Some(rate) = &self.rate {
+            rate.check_call()?;
+            rate.record_call();
+        }
 
         debug!("[{}] {}", self.name, sql);
 
@@ -338,13 +364,27 @@ impl Database for PostgresDb {
         }
 
         let row_count = rows.len();
-        Ok(QueryResult {
+        let mut result = QueryResult {
             columns,
             rows,
             row_count,
             truncated,
             command_tag,
-        })
+            redacted: false,
+        };
+
+        if let Some(rate) = &self.rate {
+            rate.check_and_record_rows(result.row_count as u64)?;
+        }
+        if redact_query_result(&mut result, &self.policy.redact) {
+            result.redacted = true;
+        }
+        if let Some(max_b) = self.policy.max_response_bytes {
+            if cap_query_result_bytes(&mut result, max_b)? {
+                result.truncated = true;
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -460,5 +500,82 @@ mod tests {
             Err(DbError::NotAllowedStatement { leading }) => assert_eq!(leading, "PRAGMA"),
             other => panic!("expected rejection, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn allowlist_blocks_on_real_execute_path_before_connect() {
+        use crate::policy::{ObjectAllowlist, TargetPolicy};
+        let policy = TargetPolicy {
+            allow_objects: ObjectAllowlist::new(vec!["users"]),
+            ..Default::default()
+        };
+        let db =
+            PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true).with_safety(policy, None);
+        let err = db
+            .execute_query("SELECT * FROM secrets", 10)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DbError::NotAllowedObject { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_blocks_second_execute_on_real_db_path() {
+        use crate::policy::{RateLimiter, TargetPolicy};
+        use std::sync::Arc;
+        let lim = Arc::new(RateLimiter::new(Some(1), None).unwrap());
+        let db = PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true)
+            .with_safety(TargetPolicy::default(), Some(lim));
+        // First call may fail to connect but still consumes the call slot.
+        let _ = db.execute_query("SELECT 1", 1).await;
+        let err = db.execute_query("SELECT 1", 1).await.unwrap_err();
+        assert!(matches!(err, DbError::RateLimited(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn catalog_list_sql_under_allowlist_is_not_object_blocked() {
+        use crate::policy::{ObjectAllowlist, TargetPolicy};
+        let policy = TargetPolicy {
+            allow_objects: ObjectAllowlist::new(vec!["users"]),
+            ..Default::default()
+        };
+        let db =
+            PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true).with_safety(policy, None);
+        let err = db
+            .execute_query(
+                "SELECT table_schema || '.' || table_name AS qname \
+                 FROM information_schema.tables \
+                 WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+                 ORDER BY 1",
+                100,
+            )
+            .await
+            .unwrap_err();
+        // Must reach the network layer (connection failed), NOT allowlist.
+        assert!(
+            !matches!(err, DbError::NotAllowedObject { .. }),
+            "catalog discovery SQL must not be allowlist-blocked, got {err:?}"
+        );
+        assert!(
+            matches!(err, DbError::ConnectionFailed(_) | DbError::QueryFailed(_)),
+            "expected connection/query failure after allowlist pass, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn check_object_access_respects_allowlist() {
+        use crate::db::traits::Database;
+        use crate::policy::{ObjectAllowlist, TargetPolicy};
+        let policy = TargetPolicy {
+            allow_objects: ObjectAllowlist::new(vec!["users"]),
+            ..Default::default()
+        };
+        let db =
+            PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true).with_safety(policy, None);
+        assert!(db.check_object_access("users").is_ok());
+        assert!(db.check_object_access("public.users").is_ok());
+        assert!(db.check_object_access("secrets").is_err());
     }
 }

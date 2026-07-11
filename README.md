@@ -1,5 +1,7 @@
 # peekdb
 
+**[Website](https://harkirat155.github.io/peekdb/)** · **[Roadmap](ROADMAP.md)** · **[Releases](https://github.com/Harkirat155/peekdb/releases)**
+
 A CLI (and MCP server) that gives you — or an AI coding agent — **read-only** access to
 Postgres, MongoDB, and Redis, with the read-only guarantee enforced by the tool itself, not
 left to good behavior.
@@ -54,11 +56,15 @@ cargo build --no-default-features --release
 
 ## Quick start (direct CLI)
 
-Copy the example config and fill in your connection details:
+Scaffold a config (recommended) or copy the example:
 
 ```bash
+peekdb init                                 # writes ~/.config/peekdb/databases.toml
+# or:
 cp databases.toml.example databases.toml   # gitignored — never committed
 ```
+
+Config discovery (first match wins): `--config` → `$PEEKDB_CONFIG` → `./databases.toml` → `~/.config/peekdb/databases.toml`.
 
 ```toml
 [[database]]
@@ -167,16 +173,42 @@ itself. A literal password in `databases.toml` is rejected at load time unless
 peekdb <COMMAND>
 
 Commands:
-  query   Run a read-only SQL statement against a configured PostgreSQL database
-  mongo   Run a read-only operation against a configured MongoDB database
-  redis   Run a read-only command against a configured Redis instance
-  serve   Start the MCP (Model Context Protocol) server over stdio
+  query         Run a read-only SQL statement against a configured PostgreSQL database
+  mongo         Run a read-only operation against a configured MongoDB database
+  redis         Run a read-only command against a configured Redis instance
+  serve         Start the MCP (Model Context Protocol) server over stdio
+  init          Create a starter databases.toml
+  doctor        Probe every configured target
+  config list   List targets with secrets masked
+  mcp-snippet   Print a ready-to-paste MCP client config
+  completions   Generate shell completions (bash/zsh/fish/…)
+  audit         Filter the JSONL audit log (--target / --blocked / --outcome)
+  repl          Interactive read-only SQL REPL (Postgres targets)
+  explore       Menu-driven table browser (Postgres)
+  fav           Named query favorites (list/show/save/rm)
+```
+
+### `init` / `doctor` / `config` / `mcp-snippet` / `audit` / interactive
+
+```bash
+peekdb init                          # ~/.config/peekdb/databases.toml
+peekdb init --path ./databases.toml
+peekdb doctor                        # SELECT 1 / list_collections / PING
+peekdb config list                   # secrets masked
+peekdb mcp-snippet                   # Claude / Cursor JSON
+peekdb completions zsh > _peekdb
+peekdb audit --blocked               # recent blocked attempts
+peekdb audit --target staging --limit 50
+peekdb repl --db staging             # interactive SQL (\\dt \\d \\sample \\fav)
+peekdb explore --db staging          # list/describe/sample tables
+peekdb fav save daily --sql "SELECT now()"
 ```
 
 ### `query` (PostgreSQL)
 
 ```
-peekdb query --config <PATH> [--db <NAME>] [--sql <SQL>] [--max-rows <N>] [--json]
+peekdb query [--config <PATH>] [--db <NAME>] [--sql <SQL>] [--max-rows <N>] \
+  [--format table|vertical|csv|tsv|json] [--json]
 ```
 
 `--sql` reads from stdin if omitted, so piping/heredocs work:
@@ -254,8 +286,20 @@ Add to `~/.claude/mcp.json` (or the Claude Desktop / Cursor equivalent):
 }
 ```
 
-Once configured, the AI has access to the `sql_query`, `mongo_query`, and `redis_query`
-tools and can explore schema and data across all configured databases.
+Once configured, the AI has discovery tools first (`list_targets`, `list_objects`,
+`describe_object`, `sample_object`), then `sql_query` / `mongo_query` / `redis_query`.
+Query tools return **structured JSON by default** (columns/rows + meta); pass
+`"format": "table"` for ASCII. Schema is also exposed as MCP resources
+(`peekdb://{target}/schema`, `peekdb://{target}/tables/{name}`).
+
+### `list_targets` / `list_objects` / `describe_object` / `sample_object`
+
+| Tool | Purpose |
+|------|---------|
+| `list_targets` | Configured names + backend (`postgres` / `mongo` / `redis`) |
+| `list_objects` | Tables, collections, or Redis `SCAN` (pattern optional) |
+| `describe_object` | Columns/indexes (PG), inferred fields+indexes (Mongo), TYPE/TTL (Redis) |
+| `sample_object` | Sample rows/docs (PG/Mongo only) |
 
 ### `sql_query` (PostgreSQL)
 
@@ -321,6 +365,27 @@ Documents are serialized as MongoDB Extended JSON (`{"$oid": "..."}` for ObjectI
 ```
 {"email": "alice@example.com", "plan": "pro"}
 ```
+
+## Optional safety controls (Phase 2)
+
+Per target in `databases.toml` (all optional; defaults keep full access within RO rules):
+
+```toml
+[[database]]
+name = "staging"
+url = "postgres://ro:${STAGING_DB_PASSWORD}@db/app"
+allow_tables = ["users", "orders"]
+max_calls_per_minute = 60
+max_rows_per_minute = 5000
+max_response_bytes = 1048576
+redact_columns = ["email"]
+redact_patterns = ["*ssn*"]
+```
+
+- **Allowlists** apply on SQL table refs (FROM/JOIN/TABLE), Mongo collections, Redis keys, and filter discovery lists.  
+- **Rate limits** are process-local sliding windows (calls recorded per attempt).  
+- **Redaction** rewrites matching columns/fields to `[REDACTED]` and sets audit `redacted: true`.  
+- **Max response bytes** truncates large payloads or errors if a single row is still too large.
 
 ## Security model
 

@@ -2,16 +2,25 @@ pub mod audit;
 pub mod cli;
 pub mod config;
 pub mod db;
+pub mod explore;
+pub mod favorites;
+pub mod paths;
+pub mod policy;
+pub mod repl;
 pub mod server;
+pub mod setup;
 
 use audit::{AuditLog, AuditedDatabase, AuditedMongo, AuditedRedis};
 use clap::{Parser, Subcommand};
-use config::{interpolate_env, Config, DatabaseConfig, MongoConfig, RedisConfig};
+use clap_complete::Shell;
+use cli::OutputFormat;
+use config::{interpolate_env, Config, DatabaseConfig, MongoConfig, RedisConfig, SafetyConfig};
 use db::mongo::MongoDb;
 use db::postgres::PostgresDb;
 use db::redis::RedisDb;
 use db::traits::{Database, MongoDatabase, MongoOperation, MongoQuery, RedisDatabase, RedisQuery};
 use mongodb::options::ClientOptions;
+use policy::{ObjectAllowlist, RateLimitRegistry, RedactRules, TargetPolicy};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -27,7 +36,7 @@ use tracing_subscriber::EnvFilter;
              Running with no subcommand (or --config alone) defaults to 'serve' for backwards compatibility.",
     version
 )]
-struct Args {
+pub struct Args {
     #[command(subcommand)]
     command: Command,
 }
@@ -42,6 +51,129 @@ enum Command {
     Mongo(MongoArgs),
     /// Execute a Redis command and print results
     Redis(RedisArgs),
+    /// Create a starter databases.toml (default: ~/.config/peekdb/databases.toml)
+    Init(InitArgs),
+    /// Probe every configured target (SELECT 1 / list_collections / PING)
+    Doctor(DoctorArgs),
+    /// Inspect configuration
+    #[command(subcommand)]
+    Config(ConfigCmd),
+    /// Print a ready-to-paste MCP client snippet (Claude / Cursor)
+    McpSnippet(McpSnippetArgs),
+    /// Generate shell completions (bash, zsh, fish, elvish, powershell)
+    Completions(CompletionsArgs),
+    /// Read and filter the append-only JSONL audit log
+    Audit(AuditArgs),
+    /// Interactive read-only SQL REPL (PostgreSQL targets)
+    Repl(ReplArgs),
+    /// Menu-driven explorer for tables/samples (PostgreSQL targets)
+    Explore(ExploreArgs),
+    /// Manage named query favorites
+    #[command(subcommand)]
+    Fav(FavCmd),
+}
+
+#[derive(clap::Args, Debug)]
+struct ReplArgs {
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long)]
+    db: Option<String>,
+    /// Output format: table|vertical|csv|tsv|json
+    #[arg(long, default_value = "table")]
+    format: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct ExploreArgs {
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long)]
+    db: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum FavCmd {
+    /// List favorites
+    List,
+    /// Show a favorite body
+    Show { name: String },
+    /// Delete a favorite
+    Rm { name: String },
+    /// Save a favorite (postgres body)
+    Save {
+        name: String,
+        /// SQL body
+        #[arg(long)]
+        sql: String,
+        #[arg(long)]
+        db: Option<String>,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+struct InitArgs {
+    /// Where to write the config (default: ~/.config/peekdb/databases.toml)
+    #[arg(long)]
+    path: Option<PathBuf>,
+    /// Overwrite an existing file
+    #[arg(long, default_value_t = false)]
+    force: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct DoctorArgs {
+    /// Path to databases.toml (optional — discovered if omitted)
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCmd {
+    /// List configured targets with secrets masked
+    List(ConfigListArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ConfigListArgs {
+    /// Path to databases.toml (optional — discovered if omitted)
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct McpSnippetArgs {
+    /// Path to databases.toml (optional — discovered if omitted)
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Absolute path to the peekdb binary (defaults to this executable)
+    #[arg(long)]
+    binary: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct CompletionsArgs {
+    /// Shell to generate completions for
+    shell: Shell,
+}
+
+#[derive(clap::Args, Debug)]
+struct AuditArgs {
+    /// Path to audit JSONL (default: next to discovered config, or ./audit.jsonl)
+    #[arg(long)]
+    path: Option<PathBuf>,
+    /// Filter by config target name
+    #[arg(long)]
+    target: Option<String>,
+    /// Filter by outcome: ok | blocked | error
+    #[arg(long)]
+    outcome: Option<String>,
+    /// Shortcut for --outcome blocked
+    #[arg(long, default_value_t = false)]
+    blocked: bool,
+    /// Max lines to print (from the end of the matching stream)
+    #[arg(long, default_value = "100")]
+    limit: usize,
 }
 
 // ── Serve sub-command (original behaviour) ────────────────────────────────────
@@ -82,9 +214,9 @@ struct ServeArgs {
 
 #[derive(clap::Args, Debug)]
 struct QueryArgs {
-    /// Path to databases.toml
+    /// Path to databases.toml (optional — discovered if omitted)
     #[arg(long)]
-    config: std::path::PathBuf,
+    config: Option<std::path::PathBuf>,
 
     /// Database name from config (can omit if only one Postgres DB is configured)
     #[arg(long)]
@@ -98,8 +230,12 @@ struct QueryArgs {
     #[arg(long, default_value = "500")]
     max_rows: usize,
 
-    /// Output rows as a JSON array instead of a table
-    #[arg(long)]
+    /// Output format: table|vertical|csv|tsv|json (overrides --json)
+    #[arg(long, default_value = "table")]
+    format: String,
+
+    /// Shorthand for --format json
+    #[arg(long, default_value_t = false)]
     json: bool,
 
     /// Path to the audit log (JSON Lines). Defaults to <config-dir>/audit.jsonl.
@@ -115,9 +251,9 @@ struct QueryArgs {
 
 #[derive(clap::Args, Debug)]
 struct MongoArgs {
-    /// Path to databases.toml
+    /// Path to databases.toml (optional — discovered if omitted)
     #[arg(long)]
-    config: std::path::PathBuf,
+    config: Option<std::path::PathBuf>,
 
     /// MongoDB database name from config (can omit if only one Mongo DB is configured)
     #[arg(long)]
@@ -155,8 +291,12 @@ struct MongoArgs {
     #[arg(long, default_value = "100")]
     limit: usize,
 
-    /// Output as a JSON array instead of pretty-printed documents
-    #[arg(long)]
+    /// Output format: table|vertical|csv|tsv|json
+    #[arg(long, default_value = "table")]
+    format: String,
+
+    /// Shorthand for --format json
+    #[arg(long, default_value_t = false)]
     json: bool,
 
     /// Path to the audit log (JSON Lines). Defaults to <config-dir>/audit.jsonl.
@@ -172,9 +312,9 @@ struct MongoArgs {
 
 #[derive(clap::Args, Debug)]
 struct RedisArgs {
-    /// Path to databases.toml
+    /// Path to databases.toml (optional — discovered if omitted)
     #[arg(long)]
-    config: std::path::PathBuf,
+    config: Option<std::path::PathBuf>,
 
     /// Redis instance name from config (can omit if only one is configured)
     #[arg(long)]
@@ -190,8 +330,12 @@ struct RedisArgs {
     #[arg(long, default_value = "100")]
     limit: usize,
 
-    /// Output as a JSON array instead of pretty-printed values
-    #[arg(long)]
+    /// Output format: table|vertical|csv|tsv|json
+    #[arg(long, default_value = "table")]
+    format: String,
+
+    /// Shorthand for --format json
+    #[arg(long, default_value_t = false)]
     json: bool,
 
     /// Path to the audit log (JSON Lines). Defaults to <config-dir>/audit.jsonl.
@@ -201,6 +345,16 @@ struct RedisArgs {
     /// Disable audit logging entirely for this run.
     #[arg(long, default_value_t = false)]
     no_audit_log: bool,
+}
+
+fn resolve_format(format: &str, json_flag: bool) -> OutputFormat {
+    if json_flag {
+        return OutputFormat::Json;
+    }
+    format.parse().unwrap_or_else(|e| {
+        eprintln!("Fatal: {e}");
+        std::process::exit(1);
+    })
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -223,6 +377,111 @@ pub async fn run() {
         Command::Query(a) => run_query(a).await,
         Command::Mongo(a) => run_mongo(a).await,
         Command::Redis(a) => run_redis(a).await,
+        Command::Init(a) => setup::run_init(setup::InitArgs {
+            path: a.path,
+            force: a.force,
+        }),
+        Command::Doctor(a) => setup::run_doctor(setup::DoctorArgs { config: a.config }).await,
+        Command::Config(ConfigCmd::List(a)) => {
+            setup::run_config_list(setup::ConfigListArgs { config: a.config })
+        }
+        Command::McpSnippet(a) => setup::run_mcp_snippet(setup::McpSnippetArgs {
+            config: a.config,
+            binary: a.binary,
+        }),
+        Command::Completions(a) => {
+            setup::run_completions(setup::CompletionsArgs { shell: a.shell })
+        }
+        Command::Audit(a) => setup::run_audit(setup::AuditArgs {
+            path: a.path,
+            target: a.target,
+            outcome: a.outcome,
+            blocked: a.blocked,
+            limit: a.limit,
+        }),
+        Command::Repl(a) => {
+            let fmt = resolve_format(&a.format, false);
+            let config_path = resolve_cli_config(a.config.as_deref());
+            let audit_path = resolve_audit_log_path(Some(&config_path), &None, false);
+            let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
+            let databases = build_pg_databases(&config_path, "repl", &audit).await;
+            repl::run_repl(databases, a.db, fmt).await;
+        }
+        Command::Explore(a) => {
+            let config_path = resolve_cli_config(a.config.as_deref());
+            let audit: Option<Arc<AuditLog>> = Some(Arc::new(AuditLog::open(
+                config_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join("audit.jsonl"),
+            )));
+            let databases = build_pg_databases(&config_path, "explore", &audit).await;
+            explore::run_explore(databases, a.db).await;
+        }
+        Command::Fav(cmd) => run_fav(cmd),
+    }
+}
+
+fn run_fav(cmd: FavCmd) {
+    use favorites::{Favorite, FavoritesFile};
+    let path = FavoritesFile::default_path();
+    let mut file = FavoritesFile::load(&path).unwrap_or_else(|e| {
+        eprintln!("Fatal: {e}");
+        std::process::exit(1);
+    });
+    match cmd {
+        FavCmd::List => {
+            for n in file.names() {
+                if let Some(f) = file.get(n) {
+                    println!(
+                        "{n:<20}  {:<8}  {}",
+                        f.backend,
+                        f.db.as_deref().unwrap_or("-")
+                    );
+                }
+            }
+            if file.names().is_empty() {
+                println!("(no favorites in {})", path.display());
+            }
+        }
+        FavCmd::Show { name } => match file.get(&name) {
+            Some(f) => {
+                println!("# backend={} db={:?}", f.backend, f.db);
+                println!("{}", f.body);
+            }
+            None => {
+                eprintln!("unknown favorite '{name}'");
+                std::process::exit(1);
+            }
+        },
+        FavCmd::Rm { name } => {
+            if file.remove(&name) {
+                if let Err(e) = file.save(&path) {
+                    eprintln!("Fatal: {e}");
+                    std::process::exit(1);
+                }
+                println!("removed {name}");
+            } else {
+                eprintln!("unknown favorite '{name}'");
+                std::process::exit(1);
+            }
+        }
+        FavCmd::Save { name, sql, db } => {
+            file.set(
+                name.clone(),
+                Favorite {
+                    backend: "postgres".into(),
+                    db,
+                    body: sql,
+                    notes: None,
+                },
+            );
+            if let Err(e) = file.save(&path) {
+                eprintln!("Fatal: {e}");
+                std::process::exit(1);
+            }
+            println!("saved {name} → {}", path.display());
+        }
     }
 }
 
@@ -232,7 +491,21 @@ pub async fn run() {
 /// DATABASE_URL only via `env`, with no `args` at all) — those must default to
 /// `serve` too, not fall through to clap's "missing subcommand" error.
 fn inject_serve_default(mut args: Vec<String>) -> Vec<String> {
-    const SUBCOMMANDS: &[&str] = &["serve", "query", "mongo", "redis"];
+    const SUBCOMMANDS: &[&str] = &[
+        "serve",
+        "query",
+        "mongo",
+        "redis",
+        "init",
+        "doctor",
+        "config",
+        "mcp-snippet",
+        "completions",
+        "audit",
+        "repl",
+        "explore",
+        "fav",
+    ];
     const PASSTHROUGH: &[&str] = &["--help", "-h", "--version", "-V"];
 
     match args.get(1).map(|s| s.as_str()) {
@@ -268,7 +541,21 @@ mod inject_serve_default_tests {
 
     #[test]
     fn known_subcommand_first_is_untouched() {
-        for sub in ["serve", "query", "mongo", "redis"] {
+        for sub in [
+            "serve",
+            "query",
+            "mongo",
+            "redis",
+            "init",
+            "doctor",
+            "config",
+            "mcp-snippet",
+            "completions",
+            "audit",
+            "repl",
+            "explore",
+            "fav",
+        ] {
             assert_eq!(inject_serve_default(v(&["bin", sub])), v(&["bin", sub]));
         }
     }
@@ -310,24 +597,57 @@ fn resolve_audit_log_path(
     config_path.map(|p| p.parent().unwrap_or(Path::new(".")).join("audit.jsonl"))
 }
 
-fn new_postgres_db(cfg: &DatabaseConfig, url: String) -> PostgresDb {
+fn safety_from_config(s: &SafetyConfig) -> TargetPolicy {
+    TargetPolicy {
+        allow_objects: ObjectAllowlist::new(s.allow_objects()),
+        redact: RedactRules {
+            columns: s.redact_columns.clone(),
+            patterns: s.redact_patterns.clone(),
+        },
+        max_response_bytes: s.max_response_bytes,
+    }
+}
+
+fn new_postgres_db(cfg: &DatabaseConfig, url: String, rates: &RateLimitRegistry) -> PostgresDb {
     let db = PostgresDb::new(&cfg.name, url, cfg.no_tls);
-    match cfg.statement_timeout_ms {
+    let db = match cfg.statement_timeout_ms {
         Some(ms) => db.with_statement_timeout_ms(ms),
         None => db,
-    }
+    };
+    let rate = rates.get_or_insert(
+        &cfg.name,
+        cfg.safety.max_calls_per_minute,
+        cfg.safety.max_rows_per_minute,
+    );
+    db.with_safety(safety_from_config(&cfg.safety), rate)
 }
 
-fn new_mongo_db(cfg: &MongoConfig, uri: String, dbname: String) -> MongoDb {
+fn new_mongo_db(
+    cfg: &MongoConfig,
+    uri: String,
+    dbname: String,
+    rates: &RateLimitRegistry,
+) -> MongoDb {
     let db = MongoDb::new(&cfg.name, uri, dbname);
-    match cfg.query_timeout_ms {
+    let db = match cfg.query_timeout_ms {
         Some(ms) => db.with_query_timeout_ms(ms),
         None => db,
-    }
+    };
+    let rate = rates.get_or_insert(
+        &cfg.name,
+        cfg.safety.max_calls_per_minute,
+        cfg.safety.max_rows_per_minute,
+    );
+    db.with_safety(safety_from_config(&cfg.safety), rate)
 }
 
-fn new_redis_db(cfg: &RedisConfig, url: String) -> RedisDb {
-    RedisDb::new(&cfg.name, url)
+fn new_redis_db(cfg: &RedisConfig, url: String, rates: &RateLimitRegistry) -> RedisDb {
+    let rate = rates.get_or_insert(
+        &cfg.name,
+        cfg.safety.max_calls_per_minute,
+        cfg.safety.max_rows_per_minute,
+    );
+    RedisDb::new(&cfg.name, url).with_safety(safety_from_config(&cfg.safety), rate)
 }
 
 async fn build_pg_databases(
@@ -336,10 +656,11 @@ async fn build_pg_databases(
     audit: &Option<Arc<AuditLog>>,
 ) -> HashMap<String, Arc<dyn Database>> {
     let config = load_config(path);
+    let rates = RateLimitRegistry::default();
     let mut databases: HashMap<String, Arc<dyn Database>> = HashMap::new();
     for cfg in config.database {
         let url = resolve_url(&cfg.name, &cfg.url);
-        let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url));
+        let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url, &rates));
         let db = match audit {
             Some(log) => Arc::new(AuditedDatabase::new(
                 db,
@@ -360,6 +681,7 @@ async fn build_mongo_databases(
     audit: &Option<Arc<AuditLog>>,
 ) -> HashMap<String, Arc<dyn MongoDatabase>> {
     let config = load_config(path);
+    let rates = RateLimitRegistry::default();
     let mut dbs: HashMap<String, Arc<dyn MongoDatabase>> = HashMap::new();
     for cfg in config.mongo {
         let uri = resolve_url(&cfg.name, &cfg.uri);
@@ -374,7 +696,7 @@ async fn build_mongo_databases(
             );
             std::process::exit(1);
         });
-        let db: Arc<dyn MongoDatabase> = Arc::new(new_mongo_db(&cfg, uri, dbname));
+        let db: Arc<dyn MongoDatabase> = Arc::new(new_mongo_db(&cfg, uri, dbname, &rates));
         let db = match audit {
             Some(log) => Arc::new(AuditedMongo::new(db, cfg.name.clone(), source, log.clone()))
                 as Arc<dyn MongoDatabase>,
@@ -391,10 +713,11 @@ async fn build_redis_databases(
     audit: &Option<Arc<AuditLog>>,
 ) -> HashMap<String, Arc<dyn RedisDatabase>> {
     let config = load_config(path);
+    let rates = RateLimitRegistry::default();
     let mut dbs: HashMap<String, Arc<dyn RedisDatabase>> = HashMap::new();
     for cfg in config.redis {
         let url = resolve_url(&cfg.name, &cfg.url);
-        let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url));
+        let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url, &rates));
         let db = match audit {
             Some(log) => Arc::new(AuditedRedis::new(db, cfg.name.clone(), source, log.clone()))
                 as Arc<dyn RedisDatabase>,
@@ -606,7 +929,15 @@ async fn run_serve(args: ServeArgs) {
         std::process::exit(1);
     }
 
-    let (pg_configs, mongo_configs, redis_configs) = match (&args.config, &args.database_url) {
+    // Resolve config path up front so discovery applies when neither flag is set.
+    let discovered = if args.config.is_none() && args.database_url.is_none() {
+        paths::resolve_config_path(None).ok()
+    } else {
+        None
+    };
+    let config_path = args.config.clone().or(discovered);
+
+    let (pg_configs, mongo_configs, redis_configs) = match (&config_path, &args.database_url) {
         (Some(path), None) => {
             let c = Config::from_file(path).unwrap_or_else(|e| {
                 eprintln!("Fatal: {}", e);
@@ -621,6 +952,7 @@ async fn run_serve(args: ServeArgs) {
                 no_tls: args.no_tls,
                 allow_literal_password: true,
                 statement_timeout_ms: None,
+                safety: Default::default(),
             }],
             vec![],
             vec![],
@@ -630,19 +962,27 @@ async fn run_serve(args: ServeArgs) {
             std::process::exit(1);
         }
         (None, None) => {
-            eprintln!("Fatal: provide --config <path> or --database-url <url>");
+            eprintln!(
+                "Fatal: provide --config <path>, --database-url <url>, or place a config at:\n{}",
+                paths::search_paths()
+                    .iter()
+                    .map(|p| format!("  - {}", p.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
             std::process::exit(1);
         }
     };
 
     let audit_path =
-        resolve_audit_log_path(args.config.as_deref(), &args.audit_log, args.no_audit_log);
+        resolve_audit_log_path(config_path.as_deref(), &args.audit_log, args.no_audit_log);
     let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
+    let rates = RateLimitRegistry::default();
 
     let mut databases: HashMap<String, Arc<dyn Database>> = HashMap::new();
     for cfg in pg_configs {
         let url = resolve_url(&cfg.name, &cfg.url);
-        let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url));
+        let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url, &rates));
         let db = match &audit {
             Some(log) => Arc::new(AuditedDatabase::new(
                 db,
@@ -666,7 +1006,7 @@ async fn run_serve(args: ServeArgs) {
             eprintln!("Fatal: mongo '{}' URI must include database name", cfg.name);
             std::process::exit(1);
         });
-        let db: Arc<dyn MongoDatabase> = Arc::new(new_mongo_db(&cfg, uri, dbname));
+        let db: Arc<dyn MongoDatabase> = Arc::new(new_mongo_db(&cfg, uri, dbname, &rates));
         let db = match &audit {
             Some(log) => Arc::new(AuditedMongo::new(db, cfg.name.clone(), "mcp", log.clone()))
                 as Arc<dyn MongoDatabase>,
@@ -678,7 +1018,7 @@ async fn run_serve(args: ServeArgs) {
     let mut redis_databases: HashMap<String, Arc<dyn RedisDatabase>> = HashMap::new();
     for cfg in redis_configs {
         let url = resolve_url(&cfg.name, &cfg.url);
-        let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url));
+        let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url, &rates));
         let db = match &audit {
             Some(log) => Arc::new(AuditedRedis::new(db, cfg.name.clone(), "mcp", log.clone()))
                 as Arc<dyn RedisDatabase>,
@@ -688,6 +1028,13 @@ async fn run_serve(args: ServeArgs) {
     }
 
     server::run(databases, mongo_databases, redis_databases, args.max_rows).await;
+}
+
+fn resolve_cli_config(explicit: Option<&Path>) -> PathBuf {
+    paths::resolve_config_path(explicit).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    })
 }
 
 async fn run_query(args: QueryArgs) {
@@ -711,17 +1058,19 @@ async fn run_query(args: QueryArgs) {
         std::process::exit(1);
     }
 
-    let audit_path = resolve_audit_log_path(Some(&args.config), &args.audit_log, args.no_audit_log);
+    let config_path = resolve_cli_config(args.config.as_deref());
+    let audit_path = resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
     let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
 
-    let databases = build_pg_databases(&args.config, "cli", &audit).await;
+    let databases = build_pg_databases(&config_path, "cli", &audit).await;
     let db = pick_pg(&databases, &args.db).unwrap_or_else(|e| {
         eprintln!("{}", e);
         std::process::exit(1);
     });
 
+    let format = resolve_format(&args.format, args.json);
     match db.execute_query(&sql, args.max_rows).await {
-        Ok(result) => cli::print_pg_result(&result, args.json),
+        Ok(result) => cli::print_pg_result(&result, format),
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
@@ -746,17 +1095,19 @@ async fn run_mongo(args: MongoArgs) {
         field: args.field,
     };
 
-    let audit_path = resolve_audit_log_path(Some(&args.config), &args.audit_log, args.no_audit_log);
+    let config_path = resolve_cli_config(args.config.as_deref());
+    let audit_path = resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
     let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
 
-    let databases = build_mongo_databases(&args.config, "cli", &audit).await;
+    let databases = build_mongo_databases(&config_path, "cli", &audit).await;
     let db = pick_mongo(&databases, &args.db).unwrap_or_else(|e| {
         eprintln!("{}", e);
         std::process::exit(1);
     });
 
+    let format = resolve_format(&args.format, args.json);
     match db.execute_mongo(query).await {
-        Ok(result) => cli::print_mongo_result(&result, args.json),
+        Ok(result) => cli::print_mongo_result(&result, format),
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
@@ -771,17 +1122,19 @@ async fn run_redis(args: RedisArgs) {
         limit: args.limit,
     };
 
-    let audit_path = resolve_audit_log_path(Some(&args.config), &args.audit_log, args.no_audit_log);
+    let config_path = resolve_cli_config(args.config.as_deref());
+    let audit_path = resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
     let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
 
-    let databases = build_redis_databases(&args.config, "cli", &audit).await;
+    let databases = build_redis_databases(&config_path, "cli", &audit).await;
     let db = pick_redis(&databases, &args.db).unwrap_or_else(|e| {
         eprintln!("{}", e);
         std::process::exit(1);
     });
 
+    let format = resolve_format(&args.format, args.json);
     match db.execute_redis(query).await {
-        Ok(result) => cli::print_redis_result(&result, args.json),
+        Ok(result) => cli::print_redis_result(&result, format),
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);

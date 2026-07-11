@@ -26,6 +26,9 @@ pub struct AuditEvent {
     pub row_count: Option<usize>,
     pub duration_ms: u128,
     pub truncated: bool,
+    /// True when column/PII redaction modified the returned payload.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub redacted: bool,
 }
 
 pub fn now_rfc3339() -> String {
@@ -127,19 +130,25 @@ impl AuditedDatabase {
 
 #[async_trait]
 impl Database for AuditedDatabase {
+    fn check_object_access(&self, name: &str) -> Result<(), DbError> {
+        self.inner.check_object_access(name)
+    }
+
     async fn execute_query(&self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
         let start = Instant::now();
         let result = self.inner.execute_query(sql, max_rows).await;
         let duration_ms = start.elapsed().as_millis();
 
-        let (outcome, detail, row_count, truncated) = match &result {
-            Ok(r) => ("ok", None, Some(r.row_count), r.truncated),
+        let (outcome, detail, row_count, truncated, redacted) = match &result {
+            Ok(r) => ("ok", None, Some(r.row_count), r.truncated, r.redacted),
             Err(
                 e @ (DbError::BlockedKeyword { .. }
                 | DbError::NotAllowedStatement { .. }
-                | DbError::MultipleStatements),
-            ) => ("blocked", Some(e.to_string()), None, false),
-            Err(e) => ("error", Some(e.to_string()), None, false),
+                | DbError::MultipleStatements
+                | DbError::NotAllowedObject { .. }
+                | DbError::RateLimited(_)),
+            ) => ("blocked", Some(e.to_string()), None, false, false),
+            Err(e) => ("error", Some(e.to_string()), None, false, false),
         };
 
         self.log.write(&AuditEvent {
@@ -153,6 +162,7 @@ impl Database for AuditedDatabase {
             row_count,
             duration_ms,
             truncated,
+            redacted,
         });
 
         result
@@ -185,6 +195,10 @@ impl AuditedMongo {
 
 #[async_trait]
 impl MongoDatabase for AuditedMongo {
+    fn check_object_access(&self, name: &str) -> Result<(), DbError> {
+        self.inner.check_object_access(name)
+    }
+
     async fn execute_mongo(&self, query: MongoQuery) -> Result<MongoResult, DbError> {
         let operation_desc = format!(
             "operation={:?} collection={:?}",
@@ -194,12 +208,14 @@ impl MongoDatabase for AuditedMongo {
         let result = self.inner.execute_mongo(query).await;
         let duration_ms = start.elapsed().as_millis();
 
-        let (outcome, detail, row_count, truncated) = match &result {
-            Ok(r) => ("ok", None, Some(r.count), r.truncated),
-            Err(e @ DbError::BlockedKeyword { .. }) => {
-                ("blocked", Some(e.to_string()), None, false)
-            }
-            Err(e) => ("error", Some(e.to_string()), None, false),
+        let (outcome, detail, row_count, truncated, redacted) = match &result {
+            Ok(r) => ("ok", None, Some(r.count), r.truncated, r.redacted),
+            Err(
+                e @ (DbError::BlockedKeyword { .. }
+                | DbError::NotAllowedObject { .. }
+                | DbError::RateLimited(_)),
+            ) => ("blocked", Some(e.to_string()), None, false, false),
+            Err(e) => ("error", Some(e.to_string()), None, false, false),
         };
 
         self.log.write(&AuditEvent {
@@ -213,6 +229,7 @@ impl MongoDatabase for AuditedMongo {
             row_count,
             duration_ms,
             truncated,
+            redacted,
         });
 
         result
@@ -251,12 +268,14 @@ impl RedisDatabase for AuditedRedis {
         let result = self.inner.execute_redis(query).await;
         let duration_ms = start.elapsed().as_millis();
 
-        let (outcome, detail, row_count, truncated) = match &result {
-            Ok(r) => ("ok", None, Some(r.count), r.truncated),
-            Err(e @ DbError::BlockedKeyword { .. }) => {
-                ("blocked", Some(e.to_string()), None, false)
-            }
-            Err(e) => ("error", Some(e.to_string()), None, false),
+        let (outcome, detail, row_count, truncated, redacted) = match &result {
+            Ok(r) => ("ok", None, Some(r.count), r.truncated, r.redacted),
+            Err(
+                e @ (DbError::BlockedKeyword { .. }
+                | DbError::NotAllowedObject { .. }
+                | DbError::RateLimited(_)),
+            ) => ("blocked", Some(e.to_string()), None, false, false),
+            Err(e) => ("error", Some(e.to_string()), None, false, false),
         };
 
         self.log.write(&AuditEvent {
@@ -270,6 +289,7 @@ impl RedisDatabase for AuditedRedis {
             row_count,
             duration_ms,
             truncated,
+            redacted,
         });
 
         result
@@ -292,6 +312,7 @@ mod tests {
             row_count: Some(1),
             duration_ms: 5,
             truncated: false,
+            redacted: false,
         }
     }
 

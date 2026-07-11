@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none">
+  <rect width="1200" height="630" fill="#07090f"/>
+  <circle cx="200" cy="80" r="280" fill="#34d399" opacity="0.12"/>
+  <circle cx="1000" cy="520" r="320" fill="#60a5fa" opacity="0.1"/>
+  <circle cx="700" cy="100" r="200" fill="#a78bfa" opacity="0.08"/>
+  <text x="96" y="250" fill="#e8ecf4" font-family="ui-sans-serif, system-ui, sans-serif" font-size="88" font-weight="800">peekdb</text>
+  <text x="96" y="340" fill="#6ee7b7" font-family="ui-sans-serif, system-ui, sans-serif" font-size="42" font-weight="600">Peek any database. Never write.</text>
+  <text x="96" y="420" fill="#8b95a8" font-family="ui-monospace, monospace" font-size="28">read-only CLI + MCP · Postgres · Mongo · Redis</text>
+  <rect x="96" y="480" width="220" height="48" rx="24" fill="#6ee7b7"/>
+  <text x="130" y="512" fill="#042f1e" font-family="ui-sans-serif, system-ui, sans-serif" font-size="22" font-weight="700">by construction</text>
+</svg>

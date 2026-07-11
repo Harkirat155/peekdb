@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Phase 0 UX: `init`, `doctor`, `config list`, `mcp-snippet`, shell `completions`
+- Config discovery: `--config` → `$PEEKDB_CONFIG` → `./databases.toml` → `~/.config/peekdb/databases.toml`
+- Product landing page (`docs/`) for GitHub Pages + public `ROADMAP.md`
+- Phase 1 agent DX: `list_targets`, `list_objects`, `describe_object`, `sample_object`
+- MCP query tools default to structured JSON (`format: "table"` for ASCII)
+- MCP Resources: `peekdb://{target}/schema` and `…/tables|collections/{name}`
+- Phase 2 safety: optional allowlists, rate limits, max_response_bytes, redact_columns/patterns
+- Recursive Mongo pipeline walk blocks nested `$out`/`$merge` (e.g. under `$facet` / `$lookup`)
+- `peekdb audit` CLI to filter JSONL by target/outcome/blocked
+- Audit events include `redacted` when PII redaction ran
+- Phase 3: `repl`, `explore`, `fav` CLI; `--format table|vertical|csv|tsv|json` on query/mongo/redis
+- Discovery under allowlists fixed (catalog SQL exempt; object-level checks)
+- Mongo `$lookup`/`$unionWith` collections enforced against allowlists
+
+### Security
+
+- Nested aggregation write stages are no longer a known gap
+- Allowlists apply to nested pipeline collection refs
+
 ## [0.1.0] - 2026-07-11
 
 ### Added

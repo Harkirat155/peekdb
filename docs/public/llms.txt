@@ -1,0 +1,103 @@
+# peekdb
+
+> Enforced read-only CLI and MCP server for Postgres, MongoDB, and Redis.
+> Agents and humans can explore data; writes are blocked by construction.
+
+Website: https://harkirat155.github.io/peekdb/
+Repository: https://github.com/Harkirat155/peekdb
+License: MIT
+
+## What it is
+
+peekdb is a single Rust binary that:
+1. Runs as an MCP server over stdio for Claude Code, Cursor, Grok, and other MCP clients
+2. Runs as a CLI (`query` / `mongo` / `redis` / `repl` / `explore` / `doctor` / `audit` / `fav`)
+3. Enforces multi-layer read-only access (allowlists, Postgres READ ONLY transactions, nested Mongo $out/$merge block, Redis command allowlist)
+4. Audits every call to append-only JSONL
+
+## Install (for agents)
+
+```bash
+cargo install --git https://github.com/Harkirat155/peekdb
+# or download a release binary from https://github.com/Harkirat155/peekdb/releases
+peekdb init
+# edit ~/.config/peekdb/databases.toml — use ${ENV_VAR} for passwords
+peekdb doctor
+peekdb mcp-snippet   # paste into MCP client config
+```
+
+Config discovery order: `--config` → `$PEEKDB_CONFIG` → `./databases.toml` → `~/.config/peekdb/databases.toml`
+
+## MCP config (Claude / Cursor)
+
+```json
+{
+  "mcpServers": {
+    "peekdb": {
+      "command": "/absolute/path/to/peekdb",
+      "args": ["--config", "/absolute/path/to/databases.toml"],
+      "env": {
+        "STAGING_DB_PASSWORD": "...",
+        "RUST_LOG": "warn"
+      }
+    }
+  }
+}
+```
+
+Or run with no args when `DATABASE_URL` is set (defaults to `serve`).
+
+## MCP tools (call in this order)
+
+| Tool | Purpose |
+|------|---------|
+| `list_targets` | Names + backend (postgres/mongo/redis). Call first. |
+| `list_objects` | Tables / collections / Redis SCAN for a target |
+| `describe_object` | Columns/indexes (PG), fields+indexes (Mongo), TYPE/TTL (Redis) |
+| `sample_object` | Sample rows/docs (PG/Mongo) |
+| `sql_query` | Read-only SQL (SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE). Default result: JSON. |
+| `mongo_query` | find/aggregate/distinct/count/list_*. $out/$merge blocked at any depth. |
+| `redis_query` | Allowlisted read commands only |
+
+Optional: `format: "table"` on query tools for ASCII tables.
+
+## MCP resources
+
+- `peekdb://{target}/schema` — tables/collections snapshot
+- `peekdb://{target}/tables/{name}` or `…/collections/{name}` — object detail
+
+## Optional safety (databases.toml per target)
+
+```toml
+allow_tables = ["users", "orders"]
+max_calls_per_minute = 60
+max_rows_per_minute = 5000
+max_response_bytes = 1048576
+redact_columns = ["email", "ssn"]
+redact_patterns = ["*password*"]
+```
+
+## Human CLI cheatsheet
+
+```bash
+peekdb query --db staging --sql "SELECT 1" --format json
+peekdb repl --db staging          # \dt \d \sample \fav \format
+peekdb explore --db staging       # interactive table browser
+peekdb audit --blocked
+peekdb fav save daily --sql "SELECT now()"
+```
+
+## Security guarantees (short)
+
+- No write mode / no --write flag
+- Postgres: statement allowlist + single-statement + session RO + transaction RO
+- Mongo: op allowlist + recursive $out/$merge block (incl. $facet/$lookup)
+- Redis: deny-by-default command allowlist
+- Audit log never stores connection strings
+- Literal passwords in config rejected unless allow_literal_password = true
+
+## Docs
+
+- README: https://github.com/Harkirat155/peekdb#readme
+- ROADMAP: https://github.com/Harkirat155/peekdb/blob/main/ROADMAP.md
+- SECURITY: https://github.com/Harkirat155/peekdb/blob/main/SECURITY.md

@@ -19,7 +19,143 @@ fn help_flag_succeeds() {
         .stdout(predicate::str::contains("query"))
         .stdout(predicate::str::contains("mongo"))
         .stdout(predicate::str::contains("redis"))
-        .stdout(predicate::str::contains("serve"));
+        .stdout(predicate::str::contains("serve"))
+        .stdout(predicate::str::contains("init"))
+        .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("mcp-snippet"))
+        .stdout(predicate::str::contains("audit"))
+        .stdout(predicate::str::contains("repl"))
+        .stdout(predicate::str::contains("explore"))
+        .stdout(predicate::str::contains("fav"));
+}
+
+#[test]
+fn fav_save_list_show_rm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(home.join(".config/peekdb")).unwrap();
+    bin()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args(["fav", "save", "demo", "--sql", "SELECT 1", "--db", "local"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("saved demo"));
+    bin()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args(["fav", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo"));
+    bin()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args(["fav", "show", "demo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("SELECT 1"));
+    bin()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args(["fav", "rm", "demo"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn query_format_help_mentions_format() {
+    bin()
+        .args(["query", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--format"));
+}
+
+#[test]
+fn repl_and_explore_help_exist() {
+    bin()
+        .args(["repl", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("format"));
+    bin()
+        .args(["explore", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("db"));
+}
+
+#[test]
+fn doctor_help_and_missing_config_fail_offline() {
+    bin()
+        .args(["doctor", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("config"));
+    let tmp = tempfile::tempdir().unwrap();
+    bin()
+        .current_dir(tmp.path())
+        .env_remove("PEEKDB_CONFIG")
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("xdg"))
+        .args(["doctor"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No config found").or(predicate::str::contains("config")));
+}
+
+#[test]
+fn all_surface_helps_succeed() {
+    for cmd in [
+        "serve",
+        "query",
+        "mongo",
+        "redis",
+        "init",
+        "doctor",
+        "mcp-snippet",
+        "completions",
+        "audit",
+        "repl",
+        "explore",
+        "fav",
+    ] {
+        bin()
+            .args([cmd, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(cmd).or(predicate::str::contains("Usage")));
+    }
+    bin().args(["config", "list", "--help"]).assert().success();
+    bin().args(["fav", "list", "--help"]).assert().success();
+}
+
+#[test]
+fn query_invalid_format_fails_offline() {
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    f.write_all(
+        br#"
+        [[database]]
+        name = "only"
+        url = "postgres://user@localhost:1/db"
+        "#,
+    )
+    .unwrap();
+    bin()
+        .args([
+            "query",
+            "--config",
+            f.path().to_str().unwrap(),
+            "--sql",
+            "SELECT 1",
+            "--format",
+            "not-a-format",
+            "--no-audit-log",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown format"));
 }
 
 #[test]
@@ -82,12 +218,150 @@ fn redis_disallowed_command_is_rejected_without_needing_a_live_server() {
 }
 
 #[test]
-fn query_missing_required_config_flag_fails() {
+fn query_without_config_fails_when_none_discoverable() {
+    // Isolate from the developer's local databases.toml / PEEKDB_CONFIG.
+    let tmp = tempfile::tempdir().unwrap();
     bin()
+        .current_dir(tmp.path())
+        .env_remove("PEEKDB_CONFIG")
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("xdg"))
         .args(["query", "--sql", "SELECT 1"])
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicate::str::contains("No config found"));
 }
+
+#[test]
+fn init_writes_config_and_config_list_masks_secrets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("databases.toml");
+    bin()
+        .args(["init", "--path", cfg.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Wrote"));
+    assert!(cfg.is_file());
+
+    // Force-overwrite path works.
+    bin()
+        .args(["init", "--path", cfg.to_str().unwrap(), "--force"])
+        .assert()
+        .success();
+
+    // Inject a literal-password entry with allow flag, ensure list masks it.
+    let mut contents = std::fs::read_to_string(&cfg).unwrap();
+    contents.push_str(
+        r#"
+
+[[database]]
+name = "secret-db"
+url = "postgres://app:hunter2@db.example:5432/app"
+allow_literal_password = true
+"#,
+    );
+    std::fs::write(&cfg, contents).unwrap();
+
+    bin()
+        .args(["config", "list", "--config", cfg.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("secret-db"))
+        .stdout(predicate::str::contains("***"))
+        .stdout(predicate::str::contains("hunter2").not());
+}
+
+#[test]
+fn mcp_snippet_prints_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("databases.toml");
+    bin()
+        .args(["init", "--path", cfg.to_str().unwrap()])
+        .assert()
+        .success();
+    bin()
+        .args(["mcp-snippet", "--config", cfg.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mcpServers"))
+        .stdout(predicate::str::contains("peekdb"));
+}
+
+#[test]
+fn completions_zsh_succeeds() {
+    bin()
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("peekdb"));
+}
+
+#[test]
+fn audit_help_and_filter_against_fixture() {
+    bin()
+        .args(["audit", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("outcome"))
+        .stdout(predicate::str::contains("target"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.jsonl");
+    std::fs::write(
+        &path,
+        r#"{"timestamp":"2026-01-01T00:00:00Z","source":"cli","backend":"postgres","target":"staging","operation":"SELECT 1","outcome":"ok","detail":null,"row_count":1,"duration_ms":1,"truncated":false}
+{"timestamp":"2026-01-01T00:00:01Z","source":"mcp","backend":"postgres","target":"staging","operation":"DROP x","outcome":"blocked","detail":"Not allowed","row_count":null,"duration_ms":0,"truncated":false}
+{"timestamp":"2026-01-01T00:00:02Z","source":"cli","backend":"mongo","target":"other","operation":"find","outcome":"ok","detail":null,"row_count":0,"duration_ms":2,"truncated":false}
+"#,
+    )
+    .unwrap();
+
+    bin()
+        .args([
+            "audit",
+            "--path",
+            path.to_str().unwrap(),
+            "--target",
+            "staging",
+            "--blocked",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("blocked"))
+        .stdout(predicate::str::contains("staging"))
+        .stdout(predicate::str::contains("\"outcome\":\"ok\"").not());
+}
+
+#[test]
+fn query_allowlist_blocks_before_connecting() {
+    // allowlist is checked before a network connect — no live DB required.
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    f.write_all(
+        br#"
+        [[database]]
+        name = "only"
+        url = "postgres://user@localhost:1/db"
+        allow_tables = ["users"]
+        "#,
+    )
+    .unwrap();
+    bin()
+        .args([
+            "query",
+            "--config",
+            f.path().to_str().unwrap(),
+            "--sql",
+            "SELECT * FROM secrets",
+            "--no-audit-log",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("allowlist"));
+}
+
+// Rate limits are process-local (shared RateLimitRegistry per peekdb process).
+// Cross-process CLI black-box cannot assert them; see postgres unit test
+// `rate_limit_blocks_second_execute_on_real_db_path`.
 
 #[test]
 fn query_nonexistent_config_path_fails_with_clear_error() {

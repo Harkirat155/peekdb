@@ -1,3 +1,8 @@
+use crate::db::schema::{
+    describe_mongo_collection, describe_pg_table, describe_redis_key, list_mongo_collections,
+    list_pg_tables, mongo_result_json, query_result_json, redis_result_json,
+    sample_mongo_collection, sample_pg_table, scan_redis_keys,
+};
 use crate::db::traits::{
     Database, MongoDatabase, MongoOperation, MongoQuery, MongoResult, QueryResult, RedisDatabase,
     RedisQuery, RedisResult,
@@ -6,8 +11,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, info, warn};
+
+#[derive(Clone, Copy)]
+enum BackendKind {
+    Postgres,
+    Mongo,
+    Redis,
+}
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -148,6 +161,57 @@ impl Server {
             )
         })
     }
+
+    /// Resolve a target name (unique across backends) to its kind + concrete handle name.
+    fn resolve_target(&self, requested: Option<&str>) -> Result<(String, BackendKind), String> {
+        let all = self.all_target_names();
+        let name = match requested {
+            Some(n) => n.to_string(),
+            None if all.len() == 1 => all[0].clone(),
+            None => {
+                return Err(format!(
+                    "No 'database' specified. Call list_targets first. Available: {}",
+                    all.join(", ")
+                ))
+            }
+        };
+        if self.databases.contains_key(&name) {
+            return Ok((name, BackendKind::Postgres));
+        }
+        if self.mongo_databases.contains_key(&name) {
+            return Ok((name, BackendKind::Mongo));
+        }
+        if self.redis_databases.contains_key(&name) {
+            return Ok((name, BackendKind::Redis));
+        }
+        Err(format!(
+            "Unknown target '{}'. Available: {}",
+            name,
+            all.join(", ")
+        ))
+    }
+
+    fn all_target_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        names.extend(self.db_names.iter().cloned());
+        names.extend(self.mongo_names.iter().cloned());
+        names.extend(self.redis_names.iter().cloned());
+        names
+    }
+
+    fn list_targets_json(&self) -> Value {
+        let mut targets = Vec::new();
+        for n in &self.db_names {
+            targets.push(json!({"name": n, "backend": "postgres"}));
+        }
+        for n in &self.mongo_names {
+            targets.push(json!({"name": n, "backend": "mongo"}));
+        }
+        for n in &self.redis_names {
+            targets.push(json!({"name": n, "backend": "redis"}));
+        }
+        json!({ "targets": targets })
+    }
 }
 
 async fn read_message(reader: &mut BufReader<tokio::io::Stdin>) -> Option<String> {
@@ -260,6 +324,8 @@ async fn dispatch(req: JsonRpcRequest, server: &Arc<Server>) -> Option<JsonRpcRe
         "ping" => Some(JsonRpcResponse::ok(req.id, json!({}))),
         "tools/list" => Some(handle_tools_list(req.id, server)),
         "tools/call" => Some(handle_tools_call(req.id, req.params, server).await),
+        "resources/list" => Some(handle_resources_list(req.id, server)),
+        "resources/read" => Some(handle_resources_read(req.id, req.params, server).await),
         m if m.starts_with("notifications/") => {
             debug!("notification: {}", m);
             None
@@ -285,7 +351,10 @@ fn handle_initialize(id: Value) -> JsonRpcResponse {
         id,
         json!({
             "protocolVersion": "2024-11-05",
-            "capabilities": { "tools": {} },
+            "capabilities": {
+                "tools": {},
+                "resources": {}
+            },
             "serverInfo": {
                 "name": "peekdb",
                 "version": env!("CARGO_PKG_VERSION")
@@ -296,6 +365,83 @@ fn handle_initialize(id: Value) -> JsonRpcResponse {
 
 fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
     let mut tools = Vec::new();
+    let all_targets = server.all_target_names();
+
+    // Discovery first — short descriptions so agents start here.
+    tools.push(json!({
+        "name": "list_targets",
+        "description": "List configured database targets (name + backend). Call this first when exploring.",
+        "inputSchema": { "type": "object", "properties": {}, "required": [] }
+    }));
+
+    if !all_targets.is_empty() {
+        let target_prop = target_property(&all_targets, "Target from list_targets");
+        tools.push(json!({
+            "name": "list_objects",
+            "description": "List tables (Postgres), collections (Mongo), or SCAN keys (Redis) for a target. Prefer this over guessing names.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "database": target_prop,
+                    "pattern": {
+                        "type": "string",
+                        "description": "Redis only: SCAN MATCH pattern (default '*'). Ignored for Postgres/Mongo."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max objects to return (default 100, max 200 for Redis SCAN).",
+                        "minimum": 1,
+                        "maximum": 2000
+                    }
+                },
+                "required": if all_targets.len() > 1 { json!(["database"]) } else { json!([]) }
+            }
+        }));
+        tools.push(json!({
+            "name": "describe_object",
+            "description": "Describe a table/view (Postgres), collection (Mongo, sample-inferred fields + indexes), or key (Redis TYPE/TTL).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "database": target_property(&all_targets, "Target from list_targets"),
+                    "object": {
+                        "type": "string",
+                        "description": "Table (optionally schema.table), collection name, or Redis key"
+                    }
+                },
+                "required": if all_targets.len() > 1 {
+                    json!(["database", "object"])
+                } else {
+                    json!(["object"])
+                }
+            }
+        }));
+        tools.push(json!({
+            "name": "sample_object",
+            "description": "Sample rows/docs from a Postgres table or Mongo collection (safe identifier / collection name). Not for Redis — use redis_query.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "database": target_property(&all_targets, "Target from list_targets"),
+                    "object": {
+                        "type": "string",
+                        "description": "Table (schema.table ok) or collection name"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max rows/docs (default 10, max 100)",
+                        "minimum": 1,
+                        "maximum": 100
+                    }
+                },
+                "required": if all_targets.len() > 1 {
+                    json!(["database", "object"])
+                } else {
+                    json!(["object"])
+                }
+            }
+        }));
+    }
 
     // sql_query tool — only if postgres databases are configured
     if !server.db_names.is_empty() {
@@ -303,13 +449,18 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
         let mut props = json!({
             "statement": {
                 "type": "string",
-                "description": "The SQL statement to execute (read-only only)"
+                "description": "Read-only SQL (SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE only)"
             },
             "max_rows": {
                 "type": "integer",
                 "description": "Maximum rows to return (1–5000). Defaults to server max_rows setting.",
                 "minimum": 1,
                 "maximum": 5000
+            },
+            "format": {
+                "type": "string",
+                "enum": ["json", "table"],
+                "description": "Result format. Default json (agent-friendly). Use table for ASCII."
             }
         });
         if multi_pg {
@@ -335,15 +486,8 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
         tools.push(json!({
             "name": "sql_query",
             "description": format!(
-                "Execute a read-only SQL query against a PostgreSQL database.\n\
-                 Databases: {db_list}\n\n\
-                 The statement must START WITH one of: SELECT, WITH, EXPLAIN, SHOW, VALUES, TABLE \
-                 (everything else — INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, GRANT, COPY, \
-                 VACUUM, SET, etc. — is rejected). EXPLAIN's own leading keyword doesn't exempt \
-                 the statement it wraps: EXPLAIN ANALYZE INSERT ... is still rejected.\n\n\
-                 Every query also runs inside BEGIN TRANSACTION READ ONLY ... ROLLBACK — Postgres \
-                 itself enforces read-only regardless of the statement allowlist above. \
-                 Only one statement per call is allowed."
+                "Read-only SQL against Postgres ({db_list}). Prefer list_objects/describe_object first. \
+                 Allowlist: SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE; plus READ ONLY transaction. Single statement only."
             ),
             "inputSchema": {
                 "type": "object",
@@ -380,7 +524,7 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
             },
             "pipeline": {
                 "type": "string",
-                "description": "Aggregation pipeline as JSON array (e.g. [{\"$match\": {...}}, {\"$group\": {...}}]). Required for aggregate. $out and $merge are blocked."
+                "description": "Aggregation pipeline as JSON array. Required for aggregate. $out/$merge blocked."
             },
             "field": {
                 "type": "string",
@@ -391,6 +535,11 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
                 "description": "Max documents to return (default 100, max 1000)",
                 "minimum": 1,
                 "maximum": 1000
+            },
+            "format": {
+                "type": "string",
+                "enum": ["json", "table"],
+                "description": "Result format. Default json."
             }
         });
         if multi_mg {
@@ -416,12 +565,8 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
         tools.push(json!({
             "name": "mongo_query",
             "description": format!(
-                "Query a MongoDB database (read-only).\n\
-                 Databases: {mongo_list}\n\n\
-                 Operations: find, aggregate, distinct, count, list_collections, list_indexes.\n\
-                 Blocked: $out and $merge pipeline stages (they write data).\n\
-                 Output uses MongoDB Extended JSON (ObjectId as {{\"$oid\": \"...\"}}). \
-                 Collection is required for all operations except list_collections."
+                "Read-only Mongo ({mongo_list}). Ops: find/aggregate/distinct/count/list_collections/list_indexes. \
+                 Prefer list_objects/describe_object for exploration. $out/$merge blocked."
             ),
             "inputSchema": {
                 "type": "object",
@@ -449,6 +594,11 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
                 "description": "Max items to display for list/set/hash-like results (default 100, max 1000)",
                 "minimum": 1,
                 "maximum": 1000
+            },
+            "format": {
+                "type": "string",
+                "enum": ["json", "table"],
+                "description": "Result format. Default json."
             }
         });
         if multi_redis {
@@ -474,14 +624,8 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
         tools.push(json!({
             "name": "redis_query",
             "description": format!(
-                "Execute a read-only Redis command.\n\
-                 Instances: {redis_list}\n\n\
-                 Allowed: GET/MGET, HGET/HGETALL/HKEYS/HVALS, LRANGE/LLEN, SMEMBERS/SISMEMBER, \
-                 ZRANGE/ZSCORE, SCAN family, TYPE, TTL, EXISTS, KEYS, and a few read-only \
-                 subcommands (CONFIG GET, CLUSTER INFO, etc.).\n\
-                 Blocked by omission: SET/DEL/EXPIRE/FLUSHALL, scripting (EVAL/FUNCTION), \
-                 transactions (MULTI/EXEC), pub/sub, CONFIG SET, ACL, SHUTDOWN, and anything \
-                 else not explicitly allowlisted."
+                "Read-only Redis ({redis_list}). Allowlisted reads only (GET/HGETALL/SCAN/TTL/…). \
+                 Writes rejected by omission. Prefer list_objects for key discovery."
             ),
             "inputSchema": {
                 "type": "object",
@@ -494,22 +638,341 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
     JsonRpcResponse::ok(id, json!({ "tools": tools }))
 }
 
+fn target_property(names: &[String], description: &str) -> Value {
+    if names.len() == 1 {
+        json!({
+            "type": "string",
+            "description": format!("{description} (only '{}' configured)", names[0]),
+            "enum": names,
+            "default": names[0]
+        })
+    } else {
+        json!({
+            "type": "string",
+            "description": format!("{description}. Available: {}", names.join(", ")),
+            "enum": names
+        })
+    }
+}
+
+fn tool_ok(id: Value, body: Value) -> JsonRpcResponse {
+    JsonRpcResponse::ok(
+        id,
+        json!({
+            "content": [{"type": "text", "text": serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())}]
+        }),
+    )
+}
+
+fn tool_err(id: Value, msg: impl std::fmt::Display) -> JsonRpcResponse {
+    JsonRpcResponse::ok(
+        id,
+        json!({
+            "content": [{"type": "text", "text": format!("Error: {msg}")}],
+            "isError": true
+        }),
+    )
+}
+
+fn wants_table(args: &Value) -> bool {
+    args.get("format")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("table"))
+}
+
 async fn handle_tools_call(id: Value, params: Value, server: &Arc<Server>) -> JsonRpcResponse {
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
     match tool_name {
+        "list_targets" => tool_ok(id, server.list_targets_json()),
+        "list_objects" => handle_list_objects(id, args, server).await,
+        "describe_object" => handle_describe_object(id, args, server).await,
+        "sample_object" => handle_sample_object(id, args, server).await,
         "sql_query" => handle_sql_query(id, args, server).await,
         "mongo_query" => handle_mongo_query(id, args, server).await,
         "redis_query" => handle_redis_query(id, args, server).await,
-        other => JsonRpcResponse::ok(
+        other => tool_err(id, format!("Unknown tool: {other}")),
+    }
+}
+
+async fn handle_list_objects(id: Value, args: Value, server: &Arc<Server>) -> JsonRpcResponse {
+    let db_name = args.get("database").and_then(|v| v.as_str());
+    let (name, kind) = match server.resolve_target(db_name) {
+        Ok(v) => v,
+        Err(e) => return tool_err(id, e),
+    };
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(100);
+
+    match kind {
+        BackendKind::Postgres => {
+            let db = server.databases.get(&name).unwrap().clone();
+            match list_pg_tables(db.as_ref()).await {
+                Ok(mut tables) => {
+                    let total = tables.len();
+                    if tables.len() > limit {
+                        tables.truncate(limit);
+                    }
+                    tool_ok(
+                        id,
+                        json!({
+                            "target": name,
+                            "backend": "postgres",
+                            "objects": tables,
+                            "meta": { "count": total.min(limit), "total_found": total, "truncated": total > limit }
+                        }),
+                    )
+                }
+                Err(e) => tool_err(id, e),
+            }
+        }
+        BackendKind::Mongo => {
+            let db = server.mongo_databases.get(&name).unwrap().clone();
+            match list_mongo_collections(db.as_ref()).await {
+                Ok(mut colls) => {
+                    let total = colls.len();
+                    if colls.len() > limit {
+                        colls.truncate(limit);
+                    }
+                    tool_ok(
+                        id,
+                        json!({
+                            "target": name,
+                            "backend": "mongo",
+                            "objects": colls,
+                            "meta": { "count": total.min(limit), "total_found": total, "truncated": total > limit }
+                        }),
+                    )
+                }
+                Err(e) => tool_err(id, e),
+            }
+        }
+        BackendKind::Redis => {
+            let db = server.redis_databases.get(&name).unwrap().clone();
+            let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
+            match scan_redis_keys(db.as_ref(), pattern, limit).await {
+                Ok(result) => tool_ok(
+                    id,
+                    json!({
+                        "target": name,
+                        "backend": "redis",
+                        "scan": redis_result_json(&result, &name, 0),
+                        "note": "Single SCAN cursor step — refine pattern rather than full keyspace dump"
+                    }),
+                ),
+                Err(e) => tool_err(id, e),
+            }
+        }
+    }
+}
+
+async fn handle_describe_object(id: Value, args: Value, server: &Arc<Server>) -> JsonRpcResponse {
+    let db_name = args.get("database").and_then(|v| v.as_str());
+    let object = match args.get("object").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return tool_err(id, "'object' is required"),
+    };
+    let (name, kind) = match server.resolve_target(db_name) {
+        Ok(v) => v,
+        Err(e) => return tool_err(id, e),
+    };
+
+    match kind {
+        BackendKind::Postgres => {
+            let db = server.databases.get(&name).unwrap().clone();
+            match describe_pg_table(db.as_ref(), object).await {
+                Ok(desc) => tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({}))),
+                Err(e) => tool_err(id, e),
+            }
+        }
+        BackendKind::Mongo => {
+            let db = server.mongo_databases.get(&name).unwrap().clone();
+            match describe_mongo_collection(db.as_ref(), object).await {
+                Ok(desc) => tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({}))),
+                Err(e) => tool_err(id, e),
+            }
+        }
+        BackendKind::Redis => {
+            let db = server.redis_databases.get(&name).unwrap().clone();
+            match describe_redis_key(db.as_ref(), object).await {
+                Ok(desc) => tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({}))),
+                Err(e) => tool_err(id, e),
+            }
+        }
+    }
+}
+
+async fn handle_sample_object(id: Value, args: Value, server: &Arc<Server>) -> JsonRpcResponse {
+    let db_name = args.get("database").and_then(|v| v.as_str());
+    let object = match args.get("object").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return tool_err(id, "'object' is required"),
+    };
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as usize).clamp(1, 100))
+        .unwrap_or(10);
+    let (name, kind) = match server.resolve_target(db_name) {
+        Ok(v) => v,
+        Err(e) => return tool_err(id, e),
+    };
+
+    let start = Instant::now();
+    match kind {
+        BackendKind::Postgres => {
+            let db = server.databases.get(&name).unwrap().clone();
+            match sample_pg_table(db.as_ref(), object, limit).await {
+                Ok(result) => {
+                    let ms = start.elapsed().as_millis();
+                    tool_ok(id, query_result_json(&result, &name, "postgres", ms))
+                }
+                Err(e) => tool_err(id, e),
+            }
+        }
+        BackendKind::Mongo => {
+            let db = server.mongo_databases.get(&name).unwrap().clone();
+            match sample_mongo_collection(db.as_ref(), object, limit).await {
+                Ok(result) => {
+                    let ms = start.elapsed().as_millis();
+                    tool_ok(id, mongo_result_json(&result, &name, ms))
+                }
+                Err(e) => tool_err(id, e),
+            }
+        }
+        BackendKind::Redis => tool_err(
             id,
-            json!({
-                "content": [{"type": "text", "text": format!("Unknown tool: {}", other)}],
-                "isError": true
-            }),
+            "sample_object is not supported for Redis; use redis_query (GET/HGETALL/…) or describe_object",
         ),
     }
+}
+
+fn handle_resources_list(id: Value, server: &Server) -> JsonRpcResponse {
+    let mut resources = Vec::new();
+    for n in &server.db_names {
+        resources.push(json!({
+            "uri": format!("peekdb://{n}/schema"),
+            "name": format!("{n} schema"),
+            "description": format!("PostgreSQL tables for target '{n}'"),
+            "mimeType": "application/json"
+        }));
+    }
+    for n in &server.mongo_names {
+        resources.push(json!({
+            "uri": format!("peekdb://{n}/schema"),
+            "name": format!("{n} schema"),
+            "description": format!("MongoDB collections for target '{n}'"),
+            "mimeType": "application/json"
+        }));
+    }
+    for n in &server.redis_names {
+        resources.push(json!({
+            "uri": format!("peekdb://{n}/schema"),
+            "name": format!("{n} schema"),
+            "description": format!("Redis instance '{n}' (use tools for key SCAN)"),
+            "mimeType": "application/json"
+        }));
+    }
+    JsonRpcResponse::ok(id, json!({ "resources": resources }))
+}
+
+async fn handle_resources_read(id: Value, params: Value, server: &Arc<Server>) -> JsonRpcResponse {
+    let uri = match params.get("uri").and_then(|v| v.as_str()) {
+        Some(u) => u,
+        None => {
+            return JsonRpcResponse::err(id, -32602, "resources/read requires 'uri'".into());
+        }
+    };
+
+    // peekdb://{target}/schema or peekdb://{target}/tables/{name}
+    let rest = match uri.strip_prefix("peekdb://") {
+        Some(r) => r,
+        None => {
+            return JsonRpcResponse::err(id, -32602, format!("unsupported uri: {uri}"));
+        }
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.is_empty() || parts[0].is_empty() {
+        return JsonRpcResponse::err(id, -32602, format!("invalid uri: {uri}"));
+    }
+    let target = parts[0];
+    let (name, kind) = match server.resolve_target(Some(target)) {
+        Ok(v) => v,
+        Err(e) => return JsonRpcResponse::err(id, -32602, e),
+    };
+
+    let body = if parts.len() == 2 && parts[1] == "schema" {
+        match kind {
+            BackendKind::Postgres => {
+                let db = server.databases.get(&name).unwrap().clone();
+                match list_pg_tables(db.as_ref()).await {
+                    Ok(tables) => json!({"target": name, "backend": "postgres", "tables": tables}),
+                    Err(e) => {
+                        return JsonRpcResponse::err(id, -32000, e.to_string());
+                    }
+                }
+            }
+            BackendKind::Mongo => {
+                let db = server.mongo_databases.get(&name).unwrap().clone();
+                match list_mongo_collections(db.as_ref()).await {
+                    Ok(c) => json!({"target": name, "backend": "mongo", "collections": c}),
+                    Err(e) => return JsonRpcResponse::err(id, -32000, e.to_string()),
+                }
+            }
+            BackendKind::Redis => json!({
+                "target": name,
+                "backend": "redis",
+                "note": "Use list_objects or redis_query SCAN; full keyspace is not exported as a resource"
+            }),
+        }
+    } else if parts.len() == 3 && (parts[1] == "tables" || parts[1] == "collections") {
+        let object = parts[2];
+        match kind {
+            BackendKind::Postgres => {
+                let db = server.databases.get(&name).unwrap().clone();
+                match describe_pg_table(db.as_ref(), object).await {
+                    Ok(d) => serde_json::to_value(d).unwrap_or(json!({})),
+                    Err(e) => return JsonRpcResponse::err(id, -32000, e.to_string()),
+                }
+            }
+            BackendKind::Mongo => {
+                let db = server.mongo_databases.get(&name).unwrap().clone();
+                match describe_mongo_collection(db.as_ref(), object).await {
+                    Ok(d) => serde_json::to_value(d).unwrap_or(json!({})),
+                    Err(e) => return JsonRpcResponse::err(id, -32000, e.to_string()),
+                }
+            }
+            BackendKind::Redis => {
+                let db = server.redis_databases.get(&name).unwrap().clone();
+                match describe_redis_key(db.as_ref(), object).await {
+                    Ok(d) => serde_json::to_value(d).unwrap_or(json!({})),
+                    Err(e) => return JsonRpcResponse::err(id, -32000, e.to_string()),
+                }
+            }
+        }
+    } else {
+        return JsonRpcResponse::err(
+            id,
+            -32602,
+            format!("unsupported uri path: {uri} (use peekdb://target/schema or …/tables/name)"),
+        );
+    };
+
+    let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
+    JsonRpcResponse::ok(
+        id,
+        json!({
+            "contents": [{
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": text
+            }]
+        }),
+    )
 }
 
 async fn handle_sql_query(id: Value, args: Value, server: &Arc<Server>) -> JsonRpcResponse {
@@ -546,20 +1009,24 @@ async fn handle_sql_query(id: Value, args: Value, server: &Arc<Server>) -> JsonR
         .map(|v| (v as usize).min(5000))
         .unwrap_or(server.default_max_rows);
 
+    let target = db_name
+        .map(|s| s.to_string())
+        .or_else(|| server.db_names.first().cloned())
+        .unwrap_or_else(|| "default".into());
+
+    let start = Instant::now();
     match db.execute_query(&statement, max_rows).await {
-        Ok(result) => JsonRpcResponse::ok(
-            id,
-            json!({
-                "content": [{"type": "text", "text": format_result(&result)}]
-            }),
-        ),
-        Err(e) => JsonRpcResponse::ok(
-            id,
-            json!({
-                "content": [{"type": "text", "text": format!("Error: {}", e)}],
-                "isError": true
-            }),
-        ),
+        Ok(result) => {
+            let ms = start.elapsed().as_millis();
+            let text = if wants_table(&args) {
+                format_result(&result)
+            } else {
+                serde_json::to_string_pretty(&query_result_json(&result, &target, "postgres", ms))
+                    .unwrap_or_default()
+            };
+            JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }))
+        }
+        Err(e) => tool_err(id, e),
     }
 }
 
@@ -630,20 +1097,24 @@ async fn handle_mongo_query(id: Value, args: Value, server: &Arc<Server>) -> Jso
         limit,
     };
 
+    let target = db_name
+        .map(|s| s.to_string())
+        .or_else(|| server.mongo_names.first().cloned())
+        .unwrap_or_else(|| "default".into());
+
+    let start = Instant::now();
     match db.execute_mongo(query).await {
-        Ok(result) => JsonRpcResponse::ok(
-            id,
-            json!({
-                "content": [{"type": "text", "text": format_mongo_result(&result)}]
-            }),
-        ),
-        Err(e) => JsonRpcResponse::ok(
-            id,
-            json!({
-                "content": [{"type": "text", "text": format!("Error: {}", e)}],
-                "isError": true
-            }),
-        ),
+        Ok(result) => {
+            let ms = start.elapsed().as_millis();
+            let text = if wants_table(&args) {
+                format_mongo_result(&result)
+            } else {
+                serde_json::to_string_pretty(&mongo_result_json(&result, &target, ms))
+                    .unwrap_or_default()
+            };
+            JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }))
+        }
+        Err(e) => tool_err(id, e),
     }
 }
 
@@ -698,20 +1169,24 @@ async fn handle_redis_query(id: Value, args: Value, server: &Arc<Server>) -> Jso
         limit,
     };
 
+    let target = db_name
+        .map(|s| s.to_string())
+        .or_else(|| server.redis_names.first().cloned())
+        .unwrap_or_else(|| "default".into());
+
+    let start = Instant::now();
     match db.execute_redis(query).await {
-        Ok(result) => JsonRpcResponse::ok(
-            id,
-            json!({
-                "content": [{"type": "text", "text": format_redis_result(&result)}]
-            }),
-        ),
-        Err(e) => JsonRpcResponse::ok(
-            id,
-            json!({
-                "content": [{"type": "text", "text": format!("Error: {}", e)}],
-                "isError": true
-            }),
-        ),
+        Ok(result) => {
+            let ms = start.elapsed().as_millis();
+            let text = if wants_table(&args) {
+                format_redis_result(&result)
+            } else {
+                serde_json::to_string_pretty(&redis_result_json(&result, &target, ms))
+                    .unwrap_or_default()
+            };
+            JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }))
+        }
+        Err(e) => tool_err(id, e),
     }
 }
 
