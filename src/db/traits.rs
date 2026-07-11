@@ -16,7 +16,9 @@ pub struct QueryResult {
 pub enum DbError {
     #[error("Blocked: statement contains disallowed keyword '{keyword}'")]
     BlockedKeyword { keyword: String },
-    #[error("Blocked: only one SQL statement per call is allowed (found ';' inside the statement)")]
+    #[error(
+        "Blocked: only one SQL statement per call is allowed (found ';' inside the statement)"
+    )]
     MultipleStatements,
     #[error("Query failed: {0}")]
     QueryFailed(String),
@@ -42,6 +44,8 @@ pub enum MongoOperation {
 }
 
 impl MongoOperation {
+    // Named to match the CLI/MCP-facing "operation" string, not the std FromStr trait.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s.to_lowercase().as_str() {
             "find" | "" => Ok(MongoOperation::Find),

@@ -1,4 +1,6 @@
-use crate::db::traits::{Database, MongoDatabase, MongoOperation, MongoQuery, MongoResult, QueryResult};
+use crate::db::traits::{
+    Database, MongoDatabase, MongoOperation, MongoQuery, MongoResult, QueryResult,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -35,10 +37,20 @@ struct RpcError {
 
 impl JsonRpcResponse {
     fn ok(id: Value, result: Value) -> Self {
-        Self { jsonrpc: "2.0".into(), id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0".into(),
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
     fn err(id: Value, code: i32, message: String) -> Self {
-        Self { jsonrpc: "2.0".into(), id, result: None, error: Some(RpcError { code, message }) }
+        Self {
+            jsonrpc: "2.0".into(),
+            id,
+            result: None,
+            error: Some(RpcError { code, message }),
+        }
     }
 }
 
@@ -60,41 +72,53 @@ impl Server {
         db_names.sort();
         let mut mongo_names: Vec<String> = mongo_databases.keys().cloned().collect();
         mongo_names.sort();
-        Self { databases, db_names, mongo_databases, mongo_names, default_max_rows }
+        Self {
+            databases,
+            db_names,
+            mongo_databases,
+            mongo_names,
+            default_max_rows,
+        }
     }
 
     fn resolve_db(&self, requested: Option<&str>) -> Result<Arc<dyn Database>, String> {
         let name = match requested {
             Some(n) => n,
             None if self.db_names.len() == 1 => &self.db_names[0],
-            None => return Err(format!(
-                "No 'database' specified. Available: {}",
-                self.db_names.join(", ")
-            )),
+            None => {
+                return Err(format!(
+                    "No 'database' specified. Available: {}",
+                    self.db_names.join(", ")
+                ))
+            }
         };
-        self.databases.get(name)
-            .cloned()
-            .ok_or_else(|| format!(
+        self.databases.get(name).cloned().ok_or_else(|| {
+            format!(
                 "Unknown database '{}'. Available: {}",
-                name, self.db_names.join(", ")
-            ))
+                name,
+                self.db_names.join(", ")
+            )
+        })
     }
 
     fn resolve_mongo(&self, requested: Option<&str>) -> Result<Arc<dyn MongoDatabase>, String> {
         let name = match requested {
             Some(n) => n,
             None if self.mongo_names.len() == 1 => &self.mongo_names[0],
-            None => return Err(format!(
-                "No 'database' specified. Available MongoDB databases: {}",
-                self.mongo_names.join(", ")
-            )),
+            None => {
+                return Err(format!(
+                    "No 'database' specified. Available MongoDB databases: {}",
+                    self.mongo_names.join(", ")
+                ))
+            }
         };
-        self.mongo_databases.get(name)
-            .cloned()
-            .ok_or_else(|| format!(
+        self.mongo_databases.get(name).cloned().ok_or_else(|| {
+            format!(
                 "Unknown MongoDB database '{}'. Available: {}",
-                name, self.mongo_names.join(", ")
-            ))
+                name,
+                self.mongo_names.join(", ")
+            )
+        })
     }
 }
 
@@ -107,27 +131,39 @@ async fn read_message(reader: &mut BufReader<tokio::io::Stdin>) -> Option<String
             Ok(0) => return None,
             Ok(_) => {
                 let trimmed = line.trim_end_matches(['\r', '\n']);
-                if trimmed.is_empty() { break; }
+                if trimmed.is_empty() {
+                    break;
+                }
                 if let Some(val) = trimmed.strip_prefix("Content-Length: ") {
                     content_length = val.trim().parse().unwrap_or(0);
                 }
             }
-            Err(e) => { error!("stdin read: {}", e); return None; }
+            Err(e) => {
+                error!("stdin read: {}", e);
+                return None;
+            }
         }
     }
 
-    if content_length == 0 { return None; }
+    if content_length == 0 {
+        return None;
+    }
 
     let mut body = vec![0u8; content_length];
     match reader.read_exact(&mut body).await {
         Ok(_) => String::from_utf8(body).ok(),
-        Err(e) => { error!("stdin body: {}", e); None }
+        Err(e) => {
+            error!("stdin body: {}", e);
+            None
+        }
     }
 }
 
 async fn write_message(stdout: &mut tokio::io::Stdout, json: &str) -> std::io::Result<()> {
     let bytes = json.as_bytes();
-    stdout.write_all(format!("Content-Length: {}\r\n\r\n", bytes.len()).as_bytes()).await?;
+    stdout
+        .write_all(format!("Content-Length: {}\r\n\r\n", bytes.len()).as_bytes())
+        .await?;
     stdout.write_all(bytes).await?;
     stdout.flush().await
 }
@@ -153,14 +189,21 @@ pub async fn run(
     loop {
         let raw = match read_message(&mut reader).await {
             Some(s) => s,
-            None => { info!("stdin closed — shutting down"); break; }
+            None => {
+                info!("stdin closed — shutting down");
+                break;
+            }
         };
 
         debug!("<<< {}", raw);
 
         let response = match serde_json::from_str::<JsonRpcRequest>(&raw) {
             Ok(req) => dispatch(req, &server).await,
-            Err(e) => Some(JsonRpcResponse::err(Value::Null, -32700, format!("Parse error: {}", e))),
+            Err(e) => Some(JsonRpcResponse::err(
+                Value::Null,
+                -32700,
+                format!("Parse error: {}", e),
+            )),
         };
 
         if let Some(resp) = response {
@@ -180,28 +223,38 @@ async fn dispatch(req: JsonRpcRequest, server: &Arc<Server>) -> Option<JsonRpcRe
         "ping" => Some(JsonRpcResponse::ok(req.id, json!({}))),
         "tools/list" => Some(handle_tools_list(req.id, server)),
         "tools/call" => Some(handle_tools_call(req.id, req.params, server).await),
-        m if m.starts_with("notifications/") => { debug!("notification: {}", m); None }
+        m if m.starts_with("notifications/") => {
+            debug!("notification: {}", m);
+            None
+        }
         unknown => {
             if req.id == Value::Null {
                 debug!("unknown notification: {}", unknown);
                 None
             } else {
                 warn!("unknown method: {}", unknown);
-                Some(JsonRpcResponse::err(req.id, -32601, format!("Method not found: {}", unknown)))
+                Some(JsonRpcResponse::err(
+                    req.id,
+                    -32601,
+                    format!("Method not found: {}", unknown),
+                ))
             }
         }
     }
 }
 
 fn handle_initialize(id: Value) -> JsonRpcResponse {
-    JsonRpcResponse::ok(id, json!({
-        "protocolVersion": "2024-11-05",
-        "capabilities": { "tools": {} },
-        "serverInfo": {
-            "name": "mcp-db-readonly",
-            "version": env!("CARGO_PKG_VERSION")
-        }
-    }))
+    JsonRpcResponse::ok(
+        id,
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "tools": {} },
+            "serverInfo": {
+                "name": "mcp-db-readonly",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        }),
+    )
 }
 
 fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
@@ -236,7 +289,11 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
                 "default": server.db_names[0]
             });
         }
-        let required = if multi_pg { json!(["statement", "database"]) } else { json!(["statement"]) };
+        let required = if multi_pg {
+            json!(["statement", "database"])
+        } else {
+            json!(["statement"])
+        };
         let db_list = server.db_names.join(", ");
         tools.push(json!({
             "name": "sql_query",
@@ -312,7 +369,11 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
                 "default": server.mongo_names[0]
             });
         }
-        let required: Value = if multi_mg { json!(["database", "operation"]) } else { json!(["operation"]) };
+        let required: Value = if multi_mg {
+            json!(["database", "operation"])
+        } else {
+            json!(["operation"])
+        };
         let mongo_list = server.mongo_names.join(", ");
         tools.push(json!({
             "name": "mongo_query",
@@ -342,44 +403,64 @@ async fn handle_tools_call(id: Value, params: Value, server: &Arc<Server>) -> Js
     match tool_name {
         "sql_query" => handle_sql_query(id, args, server).await,
         "mongo_query" => handle_mongo_query(id, args, server).await,
-        other => JsonRpcResponse::ok(id, json!({
-            "content": [{"type": "text", "text": format!("Unknown tool: {}", other)}],
-            "isError": true
-        })),
+        other => JsonRpcResponse::ok(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format!("Unknown tool: {}", other)}],
+                "isError": true
+            }),
+        ),
     }
 }
 
 async fn handle_sql_query(id: Value, args: Value, server: &Arc<Server>) -> JsonRpcResponse {
     let statement = match args.get("statement").and_then(|v| v.as_str()) {
         Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => return JsonRpcResponse::ok(id, json!({
-            "content": [{"type": "text", "text": "Error: 'statement' is required and must be non-empty"}],
-            "isError": true
-        })),
+        _ => {
+            return JsonRpcResponse::ok(
+                id,
+                json!({
+                    "content": [{"type": "text", "text": "Error: 'statement' is required and must be non-empty"}],
+                    "isError": true
+                }),
+            )
+        }
     };
 
     let db_name = args.get("database").and_then(|v| v.as_str());
     let db = match server.resolve_db(db_name) {
         Ok(db) => db,
-        Err(msg) => return JsonRpcResponse::ok(id, json!({
-            "content": [{"type": "text", "text": format!("Error: {}", msg)}],
-            "isError": true
-        })),
+        Err(msg) => {
+            return JsonRpcResponse::ok(
+                id,
+                json!({
+                    "content": [{"type": "text", "text": format!("Error: {}", msg)}],
+                    "isError": true
+                }),
+            )
+        }
     };
 
-    let max_rows = args.get("max_rows")
+    let max_rows = args
+        .get("max_rows")
         .and_then(|v| v.as_u64())
         .map(|v| (v as usize).min(5000))
         .unwrap_or(server.default_max_rows);
 
     match db.execute_query(&statement, max_rows).await {
-        Ok(result) => JsonRpcResponse::ok(id, json!({
-            "content": [{"type": "text", "text": format_result(&result)}]
-        })),
-        Err(e) => JsonRpcResponse::ok(id, json!({
-            "content": [{"type": "text", "text": format!("Error: {}", e)}],
-            "isError": true
-        })),
+        Ok(result) => JsonRpcResponse::ok(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format_result(&result)}]
+            }),
+        ),
+        Err(e) => JsonRpcResponse::ok(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format!("Error: {}", e)}],
+                "isError": true
+            }),
+        ),
     }
 }
 
@@ -387,45 +468,83 @@ async fn handle_mongo_query(id: Value, args: Value, server: &Arc<Server>) -> Jso
     let db_name = args.get("database").and_then(|v| v.as_str());
     let db = match server.resolve_mongo(db_name) {
         Ok(db) => db,
-        Err(msg) => return JsonRpcResponse::ok(id, json!({
-            "content": [{"type": "text", "text": format!("Error: {}", msg)}],
-            "isError": true
-        })),
+        Err(msg) => {
+            return JsonRpcResponse::ok(
+                id,
+                json!({
+                    "content": [{"type": "text", "text": format!("Error: {}", msg)}],
+                    "isError": true
+                }),
+            )
+        }
     };
 
-    let operation_str = args.get("operation").and_then(|v| v.as_str()).unwrap_or("find");
+    let operation_str = args
+        .get("operation")
+        .and_then(|v| v.as_str())
+        .unwrap_or("find");
     let operation = match MongoOperation::from_str(operation_str) {
         Ok(op) => op,
-        Err(msg) => return JsonRpcResponse::ok(id, json!({
-            "content": [{"type": "text", "text": format!("Error: {}", msg)}],
-            "isError": true
-        })),
+        Err(msg) => {
+            return JsonRpcResponse::ok(
+                id,
+                json!({
+                    "content": [{"type": "text", "text": format!("Error: {}", msg)}],
+                    "isError": true
+                }),
+            )
+        }
     };
 
-    let limit = args.get("limit")
+    let limit = args
+        .get("limit")
         .and_then(|v| v.as_u64())
         .map(|v| (v as usize).min(1000))
         .unwrap_or(100);
 
     let query = MongoQuery {
-        collection: args.get("collection").and_then(|v| v.as_str()).map(str::to_string),
+        collection: args
+            .get("collection")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         operation,
-        filter: args.get("filter").and_then(|v| v.as_str()).map(str::to_string),
-        projection: args.get("projection").and_then(|v| v.as_str()).map(str::to_string),
-        sort: args.get("sort").and_then(|v| v.as_str()).map(str::to_string),
-        pipeline: args.get("pipeline").and_then(|v| v.as_str()).map(str::to_string),
-        field: args.get("field").and_then(|v| v.as_str()).map(str::to_string),
+        filter: args
+            .get("filter")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        projection: args
+            .get("projection")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        sort: args
+            .get("sort")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        pipeline: args
+            .get("pipeline")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        field: args
+            .get("field")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         limit,
     };
 
     match db.execute_mongo(query).await {
-        Ok(result) => JsonRpcResponse::ok(id, json!({
-            "content": [{"type": "text", "text": format_mongo_result(&result)}]
-        })),
-        Err(e) => JsonRpcResponse::ok(id, json!({
-            "content": [{"type": "text", "text": format!("Error: {}", e)}],
-            "isError": true
-        })),
+        Ok(result) => JsonRpcResponse::ok(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format_mongo_result(&result)}]
+            }),
+        ),
+        Err(e) => JsonRpcResponse::ok(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format!("Error: {}", e)}],
+                "isError": true
+            }),
+        ),
     }
 }
 
@@ -450,7 +569,9 @@ fn format_mongo_result(result: &MongoResult) -> String {
 
 fn format_result(result: &QueryResult) -> String {
     if result.columns.is_empty() {
-        return result.command_tag.clone()
+        return result
+            .command_tag
+            .clone()
             .unwrap_or_else(|| "OK — no rows returned".to_string());
     }
 
@@ -465,7 +586,11 @@ fn format_result(result: &QueryResult) -> String {
 
     let border = format!(
         "+{}+",
-        widths.iter().map(|w| "-".repeat(w + 2)).collect::<Vec<_>>().join("+")
+        widths
+            .iter()
+            .map(|w| "-".repeat(w + 2))
+            .collect::<Vec<_>>()
+            .join("+")
     );
     let mut out = String::with_capacity(256);
 
@@ -473,9 +598,13 @@ fn format_result(result: &QueryResult) -> String {
     out.push('\n');
     out.push('|');
     out.push_str(
-        &result.columns.iter().enumerate()
+        &result
+            .columns
+            .iter()
+            .enumerate()
             .map(|(i, c)| format!(" {:w$} ", c, w = widths[i]))
-            .collect::<Vec<_>>().join("|")
+            .collect::<Vec<_>>()
+            .join("|"),
     );
     out.push_str("|\n");
     out.push_str(&border);
@@ -484,9 +613,13 @@ fn format_result(result: &QueryResult) -> String {
     for row in &result.rows {
         out.push('|');
         out.push_str(
-            &row.iter().enumerate()
-                .map(|(i, cell)| format!(" {:w$} ", cell.as_deref().unwrap_or("NULL"), w = widths[i]))
-                .collect::<Vec<_>>().join("|")
+            &row.iter()
+                .enumerate()
+                .map(|(i, cell)| {
+                    format!(" {:w$} ", cell.as_deref().unwrap_or("NULL"), w = widths[i])
+                })
+                .collect::<Vec<_>>()
+                .join("|"),
         );
         out.push_str("|\n");
     }

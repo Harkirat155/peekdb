@@ -32,7 +32,10 @@ impl Config {
             .map_err(|e| format!("Invalid config {}: {}", path.display(), e))?;
 
         if config.database.is_empty() && config.mongo.is_empty() {
-            return Err(format!("{} contains no [[database]] or [[mongo]] entries", path.display()));
+            return Err(format!(
+                "{} contains no [[database]] or [[mongo]] entries",
+                path.display()
+            ));
         }
 
         // Duplicate name detection across both postgres and mongo
@@ -50,7 +53,10 @@ impl Config {
                 return Err("Mongo entry has an empty name".into());
             }
             if !seen.insert(m.name.clone()) {
-                return Err(format!("Duplicate name '{}' across [[database]]/[[mongo]] entries", m.name));
+                return Err(format!(
+                    "Duplicate name '{}' across [[database]]/[[mongo]] entries",
+                    m.name
+                ));
             }
         }
 

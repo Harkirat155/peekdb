@@ -8,19 +8,36 @@ use tracing::{debug, error, info, warn};
 // ANALYZE is NOT here — it needs the "EXPLAIN ANALYZE is OK" special case below.
 const BLOCKED_KEYWORDS: &[&str] = &[
     // DML writes
-    "INSERT", "UPDATE", "DELETE", "MERGE",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "MERGE",
     // DDL
-    "DROP", "CREATE", "ALTER", "TRUNCATE",
+    "DROP",
+    "CREATE",
+    "ALTER",
+    "TRUNCATE",
     // Permissions
-    "GRANT", "REVOKE",
+    "GRANT",
+    "REVOKE",
     // Procedural execution
-    "EXECUTE", "EXEC", "CALL", "DO",
+    "EXECUTE",
+    "EXEC",
+    "CALL",
+    "DO",
     // File / bulk operations
-    "COPY", "IMPORT",
+    "COPY",
+    "IMPORT",
     // Maintenance
-    "VACUUM", "CLUSTER", "REINDEX", "REFRESH",
+    "VACUUM",
+    "CLUSTER",
+    "REINDEX",
+    "REFRESH",
     // Transaction state manipulation — we own the transaction wrapper
-    "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE",
+    "COMMIT",
+    "ROLLBACK",
+    "SAVEPOINT",
+    "RELEASE",
     // Session / transaction mode changes (e.g. SET TRANSACTION READ WRITE)
     "SET",
 ];
@@ -71,7 +88,9 @@ impl PostgresDb {
         client
             .simple_query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
             .await
-            .map_err(|e| DbError::ConnectionFailed(format!("'{}': failed to set READ ONLY: {}", name, e)))?;
+            .map_err(|e| {
+                DbError::ConnectionFailed(format!("'{}': failed to set READ ONLY: {}", name, e))
+            })?;
 
         info!("'{}' connected (READ ONLY).", name);
         **guard = Some(client);
@@ -80,16 +99,20 @@ impl PostgresDb {
 
     fn check_blocked(sql: &str) -> Result<(), DbError> {
         let upper = sql.to_uppercase();
-        let is_explain = upper.split_whitespace().next().map_or(false, |w| w == "EXPLAIN");
+        let is_explain = upper.split_whitespace().next() == Some("EXPLAIN");
 
         for &kw in BLOCKED_KEYWORDS {
             if keyword_found(&upper, kw) {
-                return Err(DbError::BlockedKeyword { keyword: kw.to_string() });
+                return Err(DbError::BlockedKeyword {
+                    keyword: kw.to_string(),
+                });
             }
         }
         // ANALYZE standalone is blocked; EXPLAIN ANALYZE is fine
         if !is_explain && keyword_found(&upper, "ANALYZE") {
-            return Err(DbError::BlockedKeyword { keyword: "ANALYZE".to_string() });
+            return Err(DbError::BlockedKeyword {
+                keyword: "ANALYZE".to_string(),
+            });
         }
         Ok(())
     }
@@ -137,7 +160,8 @@ fn keyword_found(haystack: &str, keyword: &str) -> bool {
         let abs = start + pos;
         let before_ok = abs == 0 || !is_ident_char(haystack.as_bytes()[abs - 1]);
         let after_pos = abs + keyword.len();
-        let after_ok = after_pos >= haystack.len() || !is_ident_char(haystack.as_bytes()[after_pos]);
+        let after_ok =
+            after_pos >= haystack.len() || !is_ident_char(haystack.as_bytes()[after_pos]);
         if before_ok && after_ok {
             return true;
         }
@@ -189,10 +213,17 @@ impl Database for PostgresDb {
                     let r = client.simple_query(sql).await;
                     let rb = client.simple_query("ROLLBACK").await;
 
-                    if let Err(ref e) = r { if e.is_closed() { connection_dead = true; } }
+                    if let Err(ref e) = r {
+                        if e.is_closed() {
+                            connection_dead = true;
+                        }
+                    }
                     if let Err(ref e) = rb {
-                        if e.is_closed() { connection_dead = true; }
-                        else { warn!("[{}] ROLLBACK failed (non-fatal): {}", self.name, e); }
+                        if e.is_closed() {
+                            connection_dead = true;
+                        } else {
+                            warn!("[{}] ROLLBACK failed (non-fatal): {}", self.name, e);
+                        }
                     }
 
                     r.map_err(|e| DbError::QueryFailed(e.to_string()))
@@ -201,7 +232,9 @@ impl Database for PostgresDb {
             // `client` borrow ends here — safe to mutate `guard` below
         };
 
-        if connection_dead { *guard = None; }
+        if connection_dead {
+            *guard = None;
+        }
 
         let messages = result?;
 
@@ -233,6 +266,12 @@ impl Database for PostgresDb {
         }
 
         let row_count = rows.len();
-        Ok(QueryResult { columns, rows, row_count, truncated, command_tag })
+        Ok(QueryResult {
+            columns,
+            rows,
+            row_count,
+            truncated,
+            command_tag,
+        })
     }
 }

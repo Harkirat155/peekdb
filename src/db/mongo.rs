@@ -17,11 +17,7 @@ pub struct MongoDb {
 }
 
 impl MongoDb {
-    pub fn new(
-        name: impl Into<String>,
-        uri: impl Into<String>,
-        dbname: impl Into<String>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, uri: impl Into<String>, dbname: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             uri: uri.into(),
@@ -34,7 +30,8 @@ impl MongoDb {
         let mut guard = self.client.lock().await;
         if guard.is_none() {
             info!("Connecting to MongoDB '{}'...", self.name);
-            let options = ClientOptions::parse(&self.uri).await
+            let options = ClientOptions::parse(&self.uri)
+                .await
                 .map_err(|e| DbError::ConnectionFailed(format!("{}: {}", self.name, e)))?;
             let client = Client::with_options(options)
                 .map_err(|e| DbError::ConnectionFailed(format!("{}: {}", self.name, e)))?;
@@ -57,7 +54,9 @@ fn parse_doc(json: Option<&str>) -> Result<Document, DbError> {
         .map_err(|e| DbError::QueryFailed(format!("BSON convert: {}", e)))?;
     match bson {
         Bson::Document(d) => Ok(d),
-        _ => Err(DbError::QueryFailed("Expected a JSON object ({...})".into())),
+        _ => Err(DbError::QueryFailed(
+            "Expected a JSON object ({...})".into(),
+        )),
     }
 }
 
@@ -65,10 +64,14 @@ fn parse_doc(json: Option<&str>) -> Result<Document, DbError> {
 fn check_pipeline_readonly(pipeline: &[Document]) -> Result<(), DbError> {
     for stage in pipeline {
         if stage.contains_key("$out") {
-            return Err(DbError::BlockedKeyword { keyword: "$out".into() });
+            return Err(DbError::BlockedKeyword {
+                keyword: "$out".into(),
+            });
         }
         if stage.contains_key("$merge") {
-            return Err(DbError::BlockedKeyword { keyword: "$merge".into() });
+            return Err(DbError::BlockedKeyword {
+                keyword: "$merge".into(),
+            });
         }
     }
     Ok(())
@@ -89,25 +92,32 @@ impl MongoDatabase for MongoDb {
         let max = query.limit;
 
         let require_coll = || {
-            query.collection.as_deref()
-                .ok_or_else(|| DbError::QueryFailed("'collection' is required for this operation".into()))
+            query.collection.as_deref().ok_or_else(|| {
+                DbError::QueryFailed("'collection' is required for this operation".into())
+            })
         };
 
         match query.operation {
             MongoOperation::ListCollections => {
-                let names = db.list_collection_names(None).await
+                let names = db
+                    .list_collection_names(None)
+                    .await
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-                let docs: Vec<String> = names.iter()
-                    .map(|n| format!("\"{}\"", n))
-                    .collect();
+                let docs: Vec<String> = names.iter().map(|n| format!("\"{}\"", n)).collect();
                 let count = docs.len();
-                Ok(MongoResult { documents: docs, count, truncated: false })
+                Ok(MongoResult {
+                    documents: docs,
+                    count,
+                    truncated: false,
+                })
             }
 
             MongoOperation::Count => {
                 let filter = parse_doc(query.filter.as_deref())?;
                 let coll = db.collection::<Document>(require_coll()?);
-                let count = coll.count_documents(filter, None).await
+                let count = coll
+                    .count_documents(filter, None)
+                    .await
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?;
                 Ok(MongoResult {
                     documents: vec![count.to_string()],
@@ -117,26 +127,43 @@ impl MongoDatabase for MongoDb {
             }
 
             MongoOperation::Distinct => {
-                let field = query.field.as_deref()
-                    .ok_or_else(|| DbError::QueryFailed("'field' is required for distinct".into()))?;
+                let field = query.field.as_deref().ok_or_else(|| {
+                    DbError::QueryFailed("'field' is required for distinct".into())
+                })?;
                 let filter = parse_doc(query.filter.as_deref())?;
                 let coll = db.collection::<Document>(require_coll()?);
-                let values = coll.distinct(field, filter, None).await
+                let values = coll
+                    .distinct(field, filter, None)
+                    .await
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?;
                 let truncated = values.len() > max;
                 let docs: Vec<String> = values.iter().take(max).map(bson_to_json_string).collect();
                 let count = docs.len();
-                Ok(MongoResult { documents: docs, count, truncated })
+                Ok(MongoResult {
+                    documents: docs,
+                    count,
+                    truncated,
+                })
             }
 
             MongoOperation::Find => {
                 let filter = parse_doc(query.filter.as_deref())?;
-                let projection = if query.projection.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+                let projection = if query
+                    .projection
+                    .as_deref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+                {
                     Some(parse_doc(query.projection.as_deref())?)
                 } else {
                     None
                 };
-                let sort = if query.sort.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+                let sort = if query
+                    .sort
+                    .as_deref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+                {
                     Some(parse_doc(query.sort.as_deref())?)
                 } else {
                     None
@@ -148,13 +175,17 @@ impl MongoDatabase for MongoDb {
                     .sort(sort)
                     .build();
 
-                let mut cursor = db.collection::<Document>(require_coll()?)
-                    .find(filter, opts).await
+                let mut cursor = db
+                    .collection::<Document>(require_coll()?)
+                    .find(filter, opts)
+                    .await
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?;
 
                 let mut docs = Vec::new();
                 let mut truncated = false;
-                while let Some(doc) = cursor.try_next().await
+                while let Some(doc) = cursor
+                    .try_next()
+                    .await
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?
                 {
                     if docs.len() >= max {
@@ -164,35 +195,47 @@ impl MongoDatabase for MongoDb {
                     docs.push(doc_to_json_string(&doc));
                 }
                 let count = docs.len();
-                Ok(MongoResult { documents: docs, count, truncated })
+                Ok(MongoResult {
+                    documents: docs,
+                    count,
+                    truncated,
+                })
             }
 
             MongoOperation::Aggregate => {
-                let pipeline_str = query.pipeline.as_deref()
-                    .ok_or_else(|| DbError::QueryFailed("'pipeline' (JSON array) is required for aggregate".into()))?;
+                let pipeline_str = query.pipeline.as_deref().ok_or_else(|| {
+                    DbError::QueryFailed("'pipeline' (JSON array) is required for aggregate".into())
+                })?;
                 let stages: Vec<serde_json::Value> = serde_json::from_str(pipeline_str)
                     .map_err(|e| DbError::QueryFailed(format!("pipeline JSON parse: {}", e)))?;
 
-                let pipeline: Vec<Document> = stages.iter()
+                let pipeline: Vec<Document> = stages
+                    .iter()
                     .map(|v| {
                         let bson = mongodb::bson::to_bson(v)
                             .map_err(|e| DbError::QueryFailed(format!("BSON: {}", e)))?;
                         match bson {
                             Bson::Document(d) => Ok(d),
-                            _ => Err(DbError::QueryFailed("Each pipeline stage must be a JSON object".into())),
+                            _ => Err(DbError::QueryFailed(
+                                "Each pipeline stage must be a JSON object".into(),
+                            )),
                         }
                     })
                     .collect::<Result<_, _>>()?;
 
                 check_pipeline_readonly(&pipeline)?;
 
-                let mut cursor = db.collection::<Document>(require_coll()?)
-                    .aggregate(pipeline, None).await
+                let mut cursor = db
+                    .collection::<Document>(require_coll()?)
+                    .aggregate(pipeline, None)
+                    .await
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?;
 
                 let mut docs = Vec::new();
                 let mut truncated = false;
-                while let Some(doc) = cursor.try_next().await
+                while let Some(doc) = cursor
+                    .try_next()
+                    .await
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?
                 {
                     if docs.len() >= max {
@@ -202,19 +245,29 @@ impl MongoDatabase for MongoDb {
                     docs.push(doc_to_json_string(&doc));
                 }
                 let count = docs.len();
-                Ok(MongoResult { documents: docs, count, truncated })
+                Ok(MongoResult {
+                    documents: docs,
+                    count,
+                    truncated,
+                })
             }
 
             MongoOperation::ListIndexes => {
-                let mut cursor = db.collection::<Document>(require_coll()?)
-                    .list_indexes(None).await
+                let mut cursor = db
+                    .collection::<Document>(require_coll()?)
+                    .list_indexes(None)
+                    .await
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?;
 
                 let mut docs = Vec::new();
-                while let Some(index) = cursor.try_next().await
+                while let Some(index) = cursor
+                    .try_next()
+                    .await
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?
                 {
-                    let name = index.options.as_ref()
+                    let name = index
+                        .options
+                        .as_ref()
                         .and_then(|o| o.name.as_deref())
                         .unwrap_or("(unnamed)");
                     let entry = mongodb::bson::doc! {
@@ -224,7 +277,11 @@ impl MongoDatabase for MongoDb {
                     docs.push(doc_to_json_string(&entry));
                 }
                 let count = docs.len();
-                Ok(MongoResult { documents: docs, count, truncated: false })
+                Ok(MongoResult {
+                    documents: docs,
+                    count,
+                    truncated: false,
+                })
             }
         }
     }
