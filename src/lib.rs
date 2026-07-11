@@ -18,9 +18,9 @@ use config::{interpolate_env, Config, DatabaseConfig, MongoConfig, RedisConfig, 
 use db::mongo::MongoDb;
 use db::postgres::PostgresDb;
 use db::redis::RedisDb;
-use policy::{ObjectAllowlist, RateLimitRegistry, RedactRules, TargetPolicy};
 use db::traits::{Database, MongoDatabase, MongoOperation, MongoQuery, RedisDatabase, RedisQuery};
 use mongodb::options::ClientOptions;
+use policy::{ObjectAllowlist, RateLimitRegistry, RedactRules, TargetPolicy};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -381,9 +381,7 @@ pub async fn run() {
             path: a.path,
             force: a.force,
         }),
-        Command::Doctor(a) => {
-            setup::run_doctor(setup::DoctorArgs { config: a.config }).await
-        }
+        Command::Doctor(a) => setup::run_doctor(setup::DoctorArgs { config: a.config }).await,
         Command::Config(ConfigCmd::List(a)) => {
             setup::run_config_list(setup::ConfigListArgs { config: a.config })
         }
@@ -404,10 +402,8 @@ pub async fn run() {
         Command::Repl(a) => {
             let fmt = resolve_format(&a.format, false);
             let config_path = resolve_cli_config(a.config.as_deref());
-            let audit_path =
-                resolve_audit_log_path(Some(&config_path), &None, false);
-            let audit: Option<Arc<AuditLog>> =
-                audit_path.map(|p| Arc::new(AuditLog::open(p)));
+            let audit_path = resolve_audit_log_path(Some(&config_path), &None, false);
+            let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
             let databases = build_pg_databases(&config_path, "repl", &audit).await;
             repl::run_repl(databases, a.db, fmt).await;
         }
@@ -612,11 +608,7 @@ fn safety_from_config(s: &SafetyConfig) -> TargetPolicy {
     }
 }
 
-fn new_postgres_db(
-    cfg: &DatabaseConfig,
-    url: String,
-    rates: &RateLimitRegistry,
-) -> PostgresDb {
+fn new_postgres_db(cfg: &DatabaseConfig, url: String, rates: &RateLimitRegistry) -> PostgresDb {
     let db = PostgresDb::new(&cfg.name, url, cfg.no_tls);
     let db = match cfg.statement_timeout_ms {
         Some(ms) => db.with_statement_timeout_ms(ms),
@@ -1067,8 +1059,7 @@ async fn run_query(args: QueryArgs) {
     }
 
     let config_path = resolve_cli_config(args.config.as_deref());
-    let audit_path =
-        resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
+    let audit_path = resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
     let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
 
     let databases = build_pg_databases(&config_path, "cli", &audit).await;
@@ -1105,8 +1096,7 @@ async fn run_mongo(args: MongoArgs) {
     };
 
     let config_path = resolve_cli_config(args.config.as_deref());
-    let audit_path =
-        resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
+    let audit_path = resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
     let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
 
     let databases = build_mongo_databases(&config_path, "cli", &audit).await;
@@ -1133,8 +1123,7 @@ async fn run_redis(args: RedisArgs) {
     };
 
     let config_path = resolve_cli_config(args.config.as_deref());
-    let audit_path =
-        resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
+    let audit_path = resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
     let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
 
     let databases = build_redis_databases(&config_path, "cli", &audit).await;

@@ -107,7 +107,10 @@ pub async fn run_repl(
         buffer.push_str(&line);
 
         let ready = buffer.trim_end().ends_with(';')
-            || (!buffer.contains(';') && !buffer.contains('\n') && !trimmed.is_empty() && !trimmed.starts_with('\\'));
+            || (!buffer.contains(';')
+                && !buffer.contains('\n')
+                && !trimmed.is_empty()
+                && !trimmed.starts_with('\\'));
         // Single-line without semicolon: execute on enter for ergonomics (psql needs ;)
         // Multi-line: wait for ;
 
@@ -257,10 +260,7 @@ async fn handle_meta(
             if parts.len() < 2 {
                 eprintln!("usage: \\sample <table> [limit]");
             } else {
-                let lim = parts
-                    .get(2)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(10usize);
+                let lim = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(10usize);
                 let db = databases.get(current).unwrap().clone();
                 match sample_pg_table(db.as_ref(), parts[1], lim).await {
                     Ok(r) => cli::print_pg_result(&r, *format),
@@ -297,7 +297,10 @@ async fn handle_meta(
                             Err(e) => eprintln!("Error: {e}"),
                         }
                     }
-                    Some(f) => eprintln!("favorite '{name}' backend is {} (repl is postgres)", f.backend),
+                    Some(f) => eprintln!(
+                        "favorite '{name}' backend is {} (repl is postgres)",
+                        f.backend
+                    ),
                     None => eprintln!("unknown favorite '{name}'"),
                 }
             } else if parts.get(1) == Some(&"save") && parts.len() >= 4 && parts[3] == "=" {

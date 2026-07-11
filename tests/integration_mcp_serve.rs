@@ -164,7 +164,35 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("postgres") && text.contains("mongo") && text.contains("redis"));
 
-    // Allowed SQL query succeeds over MCP, same as the direct `query` subcommand.
+    // list_objects / sample_object discovery path
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+            "params": {"name": "list_objects", "arguments": {"database": "pg"}}
+        }),
+    );
+    let resp = read_frame(&mut reader);
+    assert_ne!(resp["result"]["isError"], json!(true));
+    let list_txt = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        list_txt.contains("widgets"),
+        "list_objects should include widgets: {list_txt}"
+    );
+
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 22, "method": "tools/call",
+            "params": {"name": "sample_object", "arguments": {"database": "pg", "object": "widgets", "limit": 2}}
+        }),
+    );
+    let resp = read_frame(&mut reader);
+    assert_ne!(resp["result"]["isError"], json!(true));
+    let sample_txt = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(sample_txt.contains("columns") || sample_txt.contains("alpha"));
+
+    // Allowed SQL query succeeds over MCP; default format is structured JSON.
     send_frame(
         &mut stdin,
         &json!({
@@ -174,10 +202,12 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
     );
     let resp = read_frame(&mut reader);
     assert_ne!(resp["result"]["isError"], json!(true));
-    assert!(resp["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("alpha"));
+    let sql_txt = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(sql_txt.contains("alpha"));
+    assert!(
+        sql_txt.contains("\"columns\"") || sql_txt.contains("meta"),
+        "MCP sql_query should default to JSON envelope, got: {sql_txt}"
+    );
 
     // Blocked SQL statement is rejected via the MCP path too — same enforcement layer.
     send_frame(
@@ -223,6 +253,28 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
     let resp = read_frame(&mut reader);
     assert_eq!(resp["result"]["isError"], json!(true));
 
+    // Nested $out under $facet must also be blocked over MCP.
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {
+                "name": "mongo_query",
+                "arguments": {
+                    "collection": "widgets",
+                    "operation": "aggregate",
+                    "pipeline": "[{\"$facet\":{\"sneaky\":[{\"$out\":\"evil\"}]}}]"
+                }
+            }
+        }),
+    );
+    let resp = read_frame(&mut reader);
+    assert_eq!(resp["result"]["isError"], json!(true));
+    assert!(resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("$out"));
+
     // Allowed redis GET succeeds over MCP.
     send_frame(
         &mut stdin,
@@ -254,26 +306,32 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
     assert!(status.success());
 
     // Audit logging covers execute paths (list_targets is pure config — no audit line).
-    // 6 query tools/call requests still produce 6 audit lines; discovery list_targets does not.
+    // Backend tools/calls that hit execute_* produce audit lines; list_targets does not.
     let contents = std::fs::read_to_string(&audit_path).expect("audit log was written");
     let lines: Vec<serde_json::Value> = contents
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(
-        lines.len(),
-        6,
-        "expected one audit line per backend tools/call (not list_targets)"
+    // sql, sql block, mongo find, mongo $out, mongo nested $out, redis get, redis set,
+    // list_objects, sample_object = at least 7 execute-backed calls
+    assert!(
+        lines.len() >= 7,
+        "expected audit lines for execute-backed tool calls, got {}",
+        lines.len()
     );
     assert!(lines.iter().all(|l| l["source"] == "mcp"));
     let outcomes: Vec<&str> = lines
         .iter()
         .map(|l| l["outcome"].as_str().unwrap())
         .collect();
+    // Order: list_objects, sample_object, sql ok, sql block, mongo find, mongo $out,
+    // mongo nested $out, redis get, redis set
     assert_eq!(
         outcomes,
-        vec!["ok", "blocked", "ok", "blocked", "ok", "blocked"]
+        vec!["ok", "ok", "ok", "blocked", "ok", "blocked", "blocked", "ok", "blocked"]
     );
+    assert!(outcomes.contains(&"blocked"));
+    assert!(outcomes.contains(&"ok"));
     assert!(!contents.contains("testpass"));
     assert!(!contents.contains("host=localhost"));
 }

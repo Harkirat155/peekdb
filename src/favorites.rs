@@ -43,8 +43,7 @@ impl FavoritesFile {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
         }
-        let raw = toml::to_string_pretty(self)
-            .map_err(|e| format!("serialize favorites: {e}"))?;
+        let raw = toml::to_string_pretty(self).map_err(|e| format!("serialize favorites: {e}"))?;
         std::fs::write(path, raw).map_err(|e| format!("Cannot write {}: {e}", path.display()))
     }
 

@@ -509,7 +509,8 @@ mod tests {
             allow_objects: ObjectAllowlist::new(vec!["users"]),
             ..Default::default()
         };
-        let db = PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true).with_safety(policy, None);
+        let db =
+            PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true).with_safety(policy, None);
         let err = db
             .execute_query("SELECT * FROM secrets", 10)
             .await
@@ -540,7 +541,8 @@ mod tests {
             allow_objects: ObjectAllowlist::new(vec!["users"]),
             ..Default::default()
         };
-        let db = PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true).with_safety(policy, None);
+        let db =
+            PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true).with_safety(policy, None);
         let err = db
             .execute_query(
                 "SELECT table_schema || '.' || table_name AS qname \
@@ -564,13 +566,14 @@ mod tests {
 
     #[test]
     fn check_object_access_respects_allowlist() {
-        use crate::policy::{ObjectAllowlist, TargetPolicy};
         use crate::db::traits::Database;
+        use crate::policy::{ObjectAllowlist, TargetPolicy};
         let policy = TargetPolicy {
             allow_objects: ObjectAllowlist::new(vec!["users"]),
             ..Default::default()
         };
-        let db = PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true).with_safety(policy, None);
+        let db =
+            PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true).with_safety(policy, None);
         assert!(db.check_object_access("users").is_ok());
         assert!(db.check_object_access("public.users").is_ok());
         assert!(db.check_object_access("secrets").is_err());

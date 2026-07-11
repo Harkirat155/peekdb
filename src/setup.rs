@@ -75,9 +75,7 @@ pub struct AuditArgs {
 }
 
 pub fn run_init(args: InitArgs) {
-    let path = args
-        .path
-        .unwrap_or_else(paths::default_config_file);
+    let path = args.path.unwrap_or_else(paths::default_config_file);
 
     if path.exists() && !args.force {
         eprintln!(
@@ -147,12 +145,7 @@ pub fn run_config_list(args: ConfigListArgs) {
     if !config.mongo.is_empty() {
         println!("MongoDB");
         for m in &config.mongo {
-            println!(
-                "  {:<16}  {:<10}  {}",
-                m.name,
-                "mongo",
-                mask_secret(&m.uri)
-            );
+            println!("  {:<16}  {:<10}  {}", m.name, "mongo", mask_secret(&m.uri));
         }
         println!();
     }
@@ -160,12 +153,7 @@ pub fn run_config_list(args: ConfigListArgs) {
     if !config.redis.is_empty() {
         println!("Redis");
         for r in &config.redis {
-            println!(
-                "  {:<16}  {:<10}  {}",
-                r.name,
-                "redis",
-                mask_secret(&r.url)
-            );
+            println!("  {:<16}  {:<10}  {}", r.name, "redis", mask_secret(&r.url));
         }
         println!();
     }
@@ -227,10 +215,7 @@ fn resolve_audit_path(explicit: Option<PathBuf>) -> PathBuf {
         return p;
     }
     if let Ok(cfg) = paths::resolve_config_path(None) {
-        return cfg
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("audit.jsonl");
+        return cfg.parent().unwrap_or(Path::new(".")).join("audit.jsonl");
     }
     PathBuf::from("audit.jsonl")
 }

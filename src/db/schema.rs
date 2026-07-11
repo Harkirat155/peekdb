@@ -415,11 +415,7 @@ pub fn query_result_json(
     })
 }
 
-pub fn mongo_result_json(
-    result: &MongoResult,
-    target: &str,
-    duration_ms: u128,
-) -> Value {
+pub fn mongo_result_json(result: &MongoResult, target: &str, duration_ms: u128) -> Value {
     let docs: Vec<Value> = result
         .documents
         .iter()
@@ -437,11 +433,7 @@ pub fn mongo_result_json(
     })
 }
 
-pub fn redis_result_json(
-    result: &RedisResult,
-    target: &str,
-    duration_ms: u128,
-) -> Value {
+pub fn redis_result_json(result: &RedisResult, target: &str, duration_ms: u128) -> Value {
     let values: Vec<Value> = result
         .values
         .iter()
@@ -509,11 +501,7 @@ mod tests {
         ) -> Result<QueryResult, DbError> {
             Ok(QueryResult {
                 columns: vec!["qname".into()],
-                rows: self
-                    .tables
-                    .iter()
-                    .map(|t| vec![Some(t.clone())])
-                    .collect(),
+                rows: self.tables.iter().map(|t| vec![Some(t.clone())]).collect(),
                 row_count: self.tables.len(),
                 truncated: false,
                 command_tag: None,

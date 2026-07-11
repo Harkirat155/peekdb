@@ -37,15 +37,7 @@ fn fav_save_list_show_rm() {
     bin()
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
-        .args([
-            "fav",
-            "save",
-            "demo",
-            "--sql",
-            "SELECT 1",
-            "--db",
-            "local",
-        ])
+        .args(["fav", "save", "demo", "--sql", "SELECT 1", "--db", "local"])
         .assert()
         .success()
         .stdout(predicate::str::contains("saved demo"));
@@ -78,6 +70,47 @@ fn query_format_help_mentions_format() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--format"));
+}
+
+#[test]
+fn repl_and_explore_help_exist() {
+    bin()
+        .args(["repl", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("format"));
+    bin()
+        .args(["explore", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("db"));
+}
+
+#[test]
+fn query_invalid_format_fails_offline() {
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    f.write_all(
+        br#"
+        [[database]]
+        name = "only"
+        url = "postgres://user@localhost:1/db"
+        "#,
+    )
+    .unwrap();
+    bin()
+        .args([
+            "query",
+            "--config",
+            f.path().to_str().unwrap(),
+            "--sql",
+            "SELECT 1",
+            "--format",
+            "not-a-format",
+            "--no-audit-log",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown format"));
 }
 
 #[test]

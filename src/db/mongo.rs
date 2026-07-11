@@ -1,7 +1,5 @@
 use super::traits::{DbError, MongoDatabase, MongoOperation, MongoQuery, MongoResult};
-use crate::policy::{
-    cap_string_list_bytes, redact_json_documents, RateLimiter, TargetPolicy,
-};
+use crate::policy::{cap_string_list_bytes, redact_json_documents, RateLimiter, TargetPolicy};
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use mongodb::{
@@ -403,7 +401,6 @@ impl MongoDatabase for MongoDb {
                     truncated: false,
                 }
             }
-
         };
 
         // Allowlist filters list_collections output (discovery inherits execute path).
@@ -598,9 +595,7 @@ mod tests {
             projection: None,
             sort: None,
             limit: 10,
-            pipeline: Some(
-                r#"[{"$lookup":{"from":"secrets","as":"x","pipeline":[]}}]"#.into(),
-            ),
+            pipeline: Some(r#"[{"$lookup":{"from":"secrets","as":"x","pipeline":[]}}]"#.into()),
             field: None,
         };
         let err = db.execute_mongo(q).await.unwrap_err();

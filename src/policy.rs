@@ -225,7 +225,10 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
-    pub fn new(max_calls_per_minute: Option<u64>, max_rows_per_minute: Option<u64>) -> Option<Self> {
+    pub fn new(
+        max_calls_per_minute: Option<u64>,
+        max_rows_per_minute: Option<u64>,
+    ) -> Option<Self> {
         if max_calls_per_minute.is_none() && max_rows_per_minute.is_none() {
             return None;
         }

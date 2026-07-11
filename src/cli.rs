@@ -235,10 +235,7 @@ fn print_vertical(columns: &[String], rows: &[Vec<Option<String>>]) {
     for (ri, row) in rows.iter().enumerate() {
         println!("-[ RECORD {} ]-", ri + 1);
         for (i, col) in columns.iter().enumerate() {
-            let val = row
-                .get(i)
-                .and_then(|c| c.as_deref())
-                .unwrap_or("NULL");
+            let val = row.get(i).and_then(|c| c.as_deref()).unwrap_or("NULL");
             println!("{col:<label_w$} | {val}");
         }
     }
@@ -258,10 +255,7 @@ fn print_delimited(columns: &[String], rows: &[Vec<Option<String>>], sep: char) 
             .iter()
             .enumerate()
             .map(|(i, _)| {
-                let cell = row
-                    .get(i)
-                    .and_then(|c| c.as_deref())
-                    .unwrap_or("");
+                let cell = row.get(i).and_then(|c| c.as_deref()).unwrap_or("");
                 escape_delim(cell, sep)
             })
             .collect();

@@ -1,7 +1,7 @@
 use crate::db::schema::{
     describe_mongo_collection, describe_pg_table, describe_redis_key, list_mongo_collections,
-    list_pg_tables, mongo_result_json, query_result_json, redis_result_json, sample_mongo_collection,
-    sample_pg_table, scan_redis_keys,
+    list_pg_tables, mongo_result_json, query_result_json, redis_result_json,
+    sample_mongo_collection, sample_pg_table, scan_redis_keys,
 };
 use crate::db::traits::{
     Database, MongoDatabase, MongoOperation, MongoQuery, MongoResult, QueryResult, RedisDatabase,
@@ -880,11 +880,7 @@ fn handle_resources_list(id: Value, server: &Server) -> JsonRpcResponse {
     JsonRpcResponse::ok(id, json!({ "resources": resources }))
 }
 
-async fn handle_resources_read(
-    id: Value,
-    params: Value,
-    server: &Arc<Server>,
-) -> JsonRpcResponse {
+async fn handle_resources_read(id: Value, params: Value, server: &Arc<Server>) -> JsonRpcResponse {
     let uri = match params.get("uri").and_then(|v| v.as_str()) {
         Some(u) => u,
         None => {

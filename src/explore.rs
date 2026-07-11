@@ -9,10 +9,7 @@ use rustyline::DefaultEditor;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub async fn run_explore(
-    databases: HashMap<String, Arc<dyn Database>>,
-    start_db: Option<String>,
-) {
+pub async fn run_explore(databases: HashMap<String, Arc<dyn Database>>, start_db: Option<String>) {
     let mut names: Vec<String> = databases.keys().cloned().collect();
     names.sort();
     if names.is_empty() {
@@ -106,11 +103,7 @@ pub async fn run_explore(
                     Ok(desc) => {
                         println!("{} — {}", desc.name, desc.kind);
                         for c in desc.columns {
-                            println!(
-                                "  {:<28} {}",
-                                c.name,
-                                c.data_type
-                            );
+                            println!("  {:<28} {}", c.name, c.data_type);
                         }
                     }
                     Err(e) => eprintln!("Error: {e}"),
