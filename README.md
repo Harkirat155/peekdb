@@ -183,9 +183,12 @@ Commands:
   mcp-snippet   Print a ready-to-paste MCP client config
   completions   Generate shell completions (bash/zsh/fish/…)
   audit         Filter the JSONL audit log (--target / --blocked / --outcome)
+  repl          Interactive read-only SQL REPL (Postgres targets)
+  explore       Menu-driven table browser (Postgres)
+  fav           Named query favorites (list/show/save/rm)
 ```
 
-### `init` / `doctor` / `config` / `mcp-snippet` / `audit`
+### `init` / `doctor` / `config` / `mcp-snippet` / `audit` / interactive
 
 ```bash
 peekdb init                          # ~/.config/peekdb/databases.toml
@@ -196,12 +199,16 @@ peekdb mcp-snippet                   # Claude / Cursor JSON
 peekdb completions zsh > _peekdb
 peekdb audit --blocked               # recent blocked attempts
 peekdb audit --target staging --limit 50
+peekdb repl --db staging             # interactive SQL (\\dt \\d \\sample \\fav)
+peekdb explore --db staging          # list/describe/sample tables
+peekdb fav save daily --sql "SELECT now()"
 ```
 
 ### `query` (PostgreSQL)
 
 ```
-peekdb query [--config <PATH>] [--db <NAME>] [--sql <SQL>] [--max-rows <N>] [--json]
+peekdb query [--config <PATH>] [--db <NAME>] [--sql <SQL>] [--max-rows <N>] \
+  [--format table|vertical|csv|tsv|json] [--json]
 ```
 
 `--sql` reads from stdin if omitted, so piping/heredocs work:

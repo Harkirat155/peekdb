@@ -16,10 +16,14 @@ All notable changes to this project are documented here.
 - Recursive Mongo pipeline walk blocks nested `$out`/`$merge` (e.g. under `$facet` / `$lookup`)
 - `peekdb audit` CLI to filter JSONL by target/outcome/blocked
 - Audit events include `redacted` when PII redaction ran
+- Phase 3: `repl`, `explore`, `fav` CLI; `--format table|vertical|csv|tsv|json` on query/mongo/redis
+- Discovery under allowlists fixed (catalog SQL exempt; object-level checks)
+- Mongo `$lookup`/`$unionWith` collections enforced against allowlists
 
 ### Security
 
 - Nested aggregation write stages are no longer a known gap
+- Allowlists apply to nested pipeline collection refs
 
 ## [0.1.0] - 2026-07-11
 

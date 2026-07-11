@@ -45,7 +45,7 @@ Site: [harkirat155.github.io/peekdb](https://harkirat155.github.io/peekdb/) · R
 | 0 Install / doctor / config UX | **Done** |
 | 1 Agent schema tools + JSON | **Done** |
 | 2 Safety controls | **Done** (allowlists, rate limits, redaction, max bytes, nested Mongo RO, `audit` CLI) |
-| 3 REPL / TUI | Planned |
+| 3 REPL / explore / formats / favorites | **Done** |
 | 4 Platform | Ongoing |
 | Landing page | Shipped (`docs/` → GitHub Pages) |
 
@@ -82,14 +82,19 @@ peekdb audit --path ./audit.jsonl --outcome ok --limit 20
 
 ---
 
-## Phase 3 — Human delight (next)
+## Phase 3 — Human delight (**Done**)
 
 | Item | Notes |
 |------|--------|
-| `peekdb repl` | Multi-line, history, `\d` / `\dt` / `\c` |
-| Output modes | table · vertical · csv · tsv · json |
-| Favorites | Named snippets |
-| `peekdb explore` (TUI) | After schema APIs (already exist) |
+| `peekdb repl` | Multi-line SQL, history file, `\d` / `\dt` / `\c` / `\sample` / `\fav` / `\format` |
+| Output modes | `--format table|vertical|csv|tsv|json` (+ `--json` shorthand) |
+| Favorites | `peekdb fav list|show|save|rm` + REPL `\fav` → `~/.config/peekdb/favorites.toml` |
+| `peekdb explore` | Menu-driven table browser (same schema APIs; not a full ratatui TUI) |
+
+### Phase 3 learnings
+10. **REPL is postgres-first** — multi-backend REPL is possible later; one interactive surface beats a half-baked multi-backend prompt.  
+11. **Explore reuses schema helpers** — no second connection stack.  
+12. **`--json` remains** as a shorthand so existing scripts don't break when `--format` lands.
 
 ---
 

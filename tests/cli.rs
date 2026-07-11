@@ -23,7 +23,61 @@ fn help_flag_succeeds() {
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("mcp-snippet"))
-        .stdout(predicate::str::contains("audit"));
+        .stdout(predicate::str::contains("audit"))
+        .stdout(predicate::str::contains("repl"))
+        .stdout(predicate::str::contains("explore"))
+        .stdout(predicate::str::contains("fav"));
+}
+
+#[test]
+fn fav_save_list_show_rm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(home.join(".config/peekdb")).unwrap();
+    bin()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args([
+            "fav",
+            "save",
+            "demo",
+            "--sql",
+            "SELECT 1",
+            "--db",
+            "local",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("saved demo"));
+    bin()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args(["fav", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo"));
+    bin()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args(["fav", "show", "demo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("SELECT 1"));
+    bin()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args(["fav", "rm", "demo"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn query_format_help_mentions_format() {
+    bin()
+        .args(["query", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--format"));
 }
 
 #[test]

@@ -168,8 +168,8 @@ async fn non_ascii_result_does_not_panic_when_printed() {
         .await
         .unwrap();
     assert_eq!(result.row_count, 1);
-    peekdb::cli::print_pg_result(&result, false);
-    peekdb::cli::print_pg_result(&result, true);
+    peekdb::cli::print_pg_result(&result, peekdb::cli::OutputFormat::Table);
+    peekdb::cli::print_pg_result(&result, peekdb::cli::OutputFormat::Json);
 }
 
 #[tokio::test]

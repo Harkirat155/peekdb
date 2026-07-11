@@ -2,14 +2,18 @@ pub mod audit;
 pub mod cli;
 pub mod config;
 pub mod db;
+pub mod explore;
+pub mod favorites;
 pub mod paths;
 pub mod policy;
+pub mod repl;
 pub mod server;
 pub mod setup;
 
 use audit::{AuditLog, AuditedDatabase, AuditedMongo, AuditedRedis};
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
+use cli::OutputFormat;
 use config::{interpolate_env, Config, DatabaseConfig, MongoConfig, RedisConfig, SafetyConfig};
 use db::mongo::MongoDb;
 use db::postgres::PostgresDb;
@@ -60,6 +64,51 @@ enum Command {
     Completions(CompletionsArgs),
     /// Read and filter the append-only JSONL audit log
     Audit(AuditArgs),
+    /// Interactive read-only SQL REPL (PostgreSQL targets)
+    Repl(ReplArgs),
+    /// Menu-driven explorer for tables/samples (PostgreSQL targets)
+    Explore(ExploreArgs),
+    /// Manage named query favorites
+    #[command(subcommand)]
+    Fav(FavCmd),
+}
+
+#[derive(clap::Args, Debug)]
+struct ReplArgs {
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long)]
+    db: Option<String>,
+    /// Output format: table|vertical|csv|tsv|json
+    #[arg(long, default_value = "table")]
+    format: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct ExploreArgs {
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long)]
+    db: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum FavCmd {
+    /// List favorites
+    List,
+    /// Show a favorite body
+    Show { name: String },
+    /// Delete a favorite
+    Rm { name: String },
+    /// Save a favorite (postgres body)
+    Save {
+        name: String,
+        /// SQL body
+        #[arg(long)]
+        sql: String,
+        #[arg(long)]
+        db: Option<String>,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -181,8 +230,12 @@ struct QueryArgs {
     #[arg(long, default_value = "500")]
     max_rows: usize,
 
-    /// Output rows as a JSON array instead of a table
-    #[arg(long)]
+    /// Output format: table|vertical|csv|tsv|json (overrides --json)
+    #[arg(long, default_value = "table")]
+    format: String,
+
+    /// Shorthand for --format json
+    #[arg(long, default_value_t = false)]
     json: bool,
 
     /// Path to the audit log (JSON Lines). Defaults to <config-dir>/audit.jsonl.
@@ -238,8 +291,12 @@ struct MongoArgs {
     #[arg(long, default_value = "100")]
     limit: usize,
 
-    /// Output as a JSON array instead of pretty-printed documents
-    #[arg(long)]
+    /// Output format: table|vertical|csv|tsv|json
+    #[arg(long, default_value = "table")]
+    format: String,
+
+    /// Shorthand for --format json
+    #[arg(long, default_value_t = false)]
     json: bool,
 
     /// Path to the audit log (JSON Lines). Defaults to <config-dir>/audit.jsonl.
@@ -273,8 +330,12 @@ struct RedisArgs {
     #[arg(long, default_value = "100")]
     limit: usize,
 
-    /// Output as a JSON array instead of pretty-printed values
-    #[arg(long)]
+    /// Output format: table|vertical|csv|tsv|json
+    #[arg(long, default_value = "table")]
+    format: String,
+
+    /// Shorthand for --format json
+    #[arg(long, default_value_t = false)]
     json: bool,
 
     /// Path to the audit log (JSON Lines). Defaults to <config-dir>/audit.jsonl.
@@ -284,6 +345,16 @@ struct RedisArgs {
     /// Disable audit logging entirely for this run.
     #[arg(long, default_value_t = false)]
     no_audit_log: bool,
+}
+
+fn resolve_format(format: &str, json_flag: bool) -> OutputFormat {
+    if json_flag {
+        return OutputFormat::Json;
+    }
+    format.parse().unwrap_or_else(|e| {
+        eprintln!("Fatal: {e}");
+        std::process::exit(1);
+    })
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -330,6 +401,91 @@ pub async fn run() {
             blocked: a.blocked,
             limit: a.limit,
         }),
+        Command::Repl(a) => {
+            let fmt = resolve_format(&a.format, false);
+            let config_path = resolve_cli_config(a.config.as_deref());
+            let audit_path =
+                resolve_audit_log_path(Some(&config_path), &None, false);
+            let audit: Option<Arc<AuditLog>> =
+                audit_path.map(|p| Arc::new(AuditLog::open(p)));
+            let databases = build_pg_databases(&config_path, "repl", &audit).await;
+            repl::run_repl(databases, a.db, fmt).await;
+        }
+        Command::Explore(a) => {
+            let config_path = resolve_cli_config(a.config.as_deref());
+            let audit: Option<Arc<AuditLog>> = Some(Arc::new(AuditLog::open(
+                config_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join("audit.jsonl"),
+            )));
+            let databases = build_pg_databases(&config_path, "explore", &audit).await;
+            explore::run_explore(databases, a.db).await;
+        }
+        Command::Fav(cmd) => run_fav(cmd),
+    }
+}
+
+fn run_fav(cmd: FavCmd) {
+    use favorites::{Favorite, FavoritesFile};
+    let path = FavoritesFile::default_path();
+    let mut file = FavoritesFile::load(&path).unwrap_or_else(|e| {
+        eprintln!("Fatal: {e}");
+        std::process::exit(1);
+    });
+    match cmd {
+        FavCmd::List => {
+            for n in file.names() {
+                if let Some(f) = file.get(n) {
+                    println!(
+                        "{n:<20}  {:<8}  {}",
+                        f.backend,
+                        f.db.as_deref().unwrap_or("-")
+                    );
+                }
+            }
+            if file.names().is_empty() {
+                println!("(no favorites in {})", path.display());
+            }
+        }
+        FavCmd::Show { name } => match file.get(&name) {
+            Some(f) => {
+                println!("# backend={} db={:?}", f.backend, f.db);
+                println!("{}", f.body);
+            }
+            None => {
+                eprintln!("unknown favorite '{name}'");
+                std::process::exit(1);
+            }
+        },
+        FavCmd::Rm { name } => {
+            if file.remove(&name) {
+                if let Err(e) = file.save(&path) {
+                    eprintln!("Fatal: {e}");
+                    std::process::exit(1);
+                }
+                println!("removed {name}");
+            } else {
+                eprintln!("unknown favorite '{name}'");
+                std::process::exit(1);
+            }
+        }
+        FavCmd::Save { name, sql, db } => {
+            file.set(
+                name.clone(),
+                Favorite {
+                    backend: "postgres".into(),
+                    db,
+                    body: sql,
+                    notes: None,
+                },
+            );
+            if let Err(e) = file.save(&path) {
+                eprintln!("Fatal: {e}");
+                std::process::exit(1);
+            }
+            println!("saved {name} → {}", path.display());
+        }
     }
 }
 
@@ -350,6 +506,9 @@ fn inject_serve_default(mut args: Vec<String>) -> Vec<String> {
         "mcp-snippet",
         "completions",
         "audit",
+        "repl",
+        "explore",
+        "fav",
     ];
     const PASSTHROUGH: &[&str] = &["--help", "-h", "--version", "-V"];
 
@@ -397,6 +556,9 @@ mod inject_serve_default_tests {
             "mcp-snippet",
             "completions",
             "audit",
+            "repl",
+            "explore",
+            "fav",
         ] {
             assert_eq!(inject_serve_default(v(&["bin", sub])), v(&["bin", sub]));
         }
@@ -915,8 +1077,9 @@ async fn run_query(args: QueryArgs) {
         std::process::exit(1);
     });
 
+    let format = resolve_format(&args.format, args.json);
     match db.execute_query(&sql, args.max_rows).await {
-        Ok(result) => cli::print_pg_result(&result, args.json),
+        Ok(result) => cli::print_pg_result(&result, format),
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
@@ -952,8 +1115,9 @@ async fn run_mongo(args: MongoArgs) {
         std::process::exit(1);
     });
 
+    let format = resolve_format(&args.format, args.json);
     match db.execute_mongo(query).await {
-        Ok(result) => cli::print_mongo_result(&result, args.json),
+        Ok(result) => cli::print_mongo_result(&result, format),
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
@@ -979,8 +1143,9 @@ async fn run_redis(args: RedisArgs) {
         std::process::exit(1);
     });
 
+    let format = resolve_format(&args.format, args.json);
     match db.execute_redis(query).await {
-        Ok(result) => cli::print_redis_result(&result, args.json),
+        Ok(result) => cli::print_redis_result(&result, format),
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
