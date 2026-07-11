@@ -286,3 +286,74 @@ impl MongoDatabase for MongoDb {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mongodb::bson::doc;
+
+    #[test]
+    fn parse_doc_none_and_empty_variants_yield_empty_document() {
+        assert_eq!(parse_doc(None).unwrap(), Document::new());
+        assert_eq!(parse_doc(Some("")).unwrap(), Document::new());
+        assert_eq!(parse_doc(Some("{}")).unwrap(), Document::new());
+    }
+
+    #[test]
+    fn parse_doc_parses_a_json_object() {
+        let d = parse_doc(Some(r#"{"status":"active","count":3}"#)).unwrap();
+        assert_eq!(d.get_str("status").unwrap(), "active");
+        let count = d.get("count").unwrap();
+        assert_eq!(
+            count.as_i32().map(i64::from).or_else(|| count.as_i64()),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn parse_doc_rejects_non_object_json() {
+        assert!(parse_doc(Some("[1,2,3]")).is_err());
+        assert!(parse_doc(Some("not json")).is_err());
+    }
+
+    #[test]
+    fn pipeline_without_out_or_merge_is_allowed() {
+        let pipeline = vec![doc! {"$match": {"status": "active"}}, doc! {"$limit": 10}];
+        assert!(check_pipeline_readonly(&pipeline).is_ok());
+    }
+
+    #[test]
+    fn pipeline_with_out_stage_is_blocked() {
+        let pipeline = vec![doc! {"$match": {}}, doc! {"$out": "other_collection"}];
+        match check_pipeline_readonly(&pipeline) {
+            Err(DbError::BlockedKeyword { keyword }) => assert_eq!(keyword, "$out"),
+            other => panic!("expected $out to be blocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipeline_with_merge_stage_is_blocked() {
+        let pipeline = vec![doc! {"$merge": {"into": "other_collection"}}];
+        match check_pipeline_readonly(&pipeline) {
+            Err(DbError::BlockedKeyword { keyword }) => assert_eq!(keyword, "$merge"),
+            other => panic!("expected $merge to be blocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn known_gap_nested_out_inside_facet_is_not_caught() {
+        // check_pipeline_readonly only inspects top-level stage keys. A $out/$merge
+        // nested inside a $facet or $lookup sub-pipeline is NOT detected today.
+        // Characterization test documenting the gap (flagged for the security-hardening
+        // track), not a desired behavior.
+        let pipeline = vec![doc! {
+            "$facet": {
+                "sneaky": [{"$out": "other_collection"}]
+            }
+        }];
+        assert!(
+            check_pipeline_readonly(&pipeline).is_ok(),
+            "this documents a known gap — nested $out is not currently detected"
+        );
+    }
+}

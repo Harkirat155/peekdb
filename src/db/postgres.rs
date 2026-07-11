@@ -275,3 +275,96 @@ impl Database for PostgresDb {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_blocked_keyword_is_rejected() {
+        let samples: &[(&str, &str)] = &[
+            ("INSERT", "INSERT INTO t VALUES (1)"),
+            ("UPDATE", "UPDATE t SET x = 1"),
+            ("DELETE", "DELETE FROM t"),
+            ("MERGE", "MERGE INTO t USING s ON t.id = s.id"),
+            ("DROP", "DROP TABLE t"),
+            ("CREATE", "CREATE TABLE t (id int)"),
+            ("ALTER", "ALTER TABLE t ADD COLUMN x int"),
+            ("TRUNCATE", "TRUNCATE t"),
+            ("GRANT", "GRANT SELECT ON t TO foo"),
+            ("REVOKE", "REVOKE SELECT ON t FROM foo"),
+            ("EXECUTE", "EXECUTE stmt"),
+            ("EXEC", "EXEC stmt"),
+            ("CALL", "CALL proc()"),
+            ("DO", "DO $$ BEGIN NULL; END $$"),
+            ("COPY", "COPY t TO STDOUT"),
+            ("IMPORT", "IMPORT FOREIGN SCHEMA s"),
+            ("VACUUM", "VACUUM t"),
+            ("CLUSTER", "CLUSTER t"),
+            ("REINDEX", "REINDEX TABLE t"),
+            ("REFRESH", "REFRESH MATERIALIZED VIEW t"),
+            ("COMMIT", "COMMIT"),
+            ("ROLLBACK", "ROLLBACK"),
+            ("SAVEPOINT", "SAVEPOINT s"),
+            ("RELEASE", "RELEASE s"),
+            ("SET", "SET search_path = public"),
+        ];
+        for (kw, sql) in samples {
+            match PostgresDb::check_blocked(sql) {
+                Err(DbError::BlockedKeyword { keyword }) => assert_eq!(&keyword, kw),
+                other => panic!("expected {kw} to be blocked for {sql:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_analyze_is_blocked() {
+        assert!(matches!(
+            PostgresDb::check_blocked("ANALYZE t"),
+            Err(DbError::BlockedKeyword { .. })
+        ));
+    }
+
+    #[test]
+    fn explain_analyze_is_allowed_through_the_blocklist() {
+        assert!(PostgresDb::check_blocked("EXPLAIN ANALYZE SELECT 1").is_ok());
+        assert!(PostgresDb::check_blocked("EXPLAIN SELECT 1").is_ok());
+    }
+
+    #[test]
+    fn plain_select_is_allowed() {
+        assert!(PostgresDb::check_blocked("SELECT * FROM t WHERE id = 1").is_ok());
+    }
+
+    #[test]
+    fn identifiers_containing_keyword_substrings_are_not_false_positives() {
+        // Word-boundary matching must not trip on column/identifier names that merely
+        // contain a blocked keyword as a substring.
+        for sql in [
+            "SELECT created_at FROM t",
+            "SELECT copy_of_x FROM t",
+            "SELECT * FROM t WHERE do_not_use = 1",
+            "SELECT set_id FROM t",
+            "SELECT * FROM t WHERE call_count > 0",
+        ] {
+            assert!(
+                PostgresDb::check_blocked(sql).is_ok(),
+                "{sql:?} should not be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn known_false_positive_string_literal_containing_a_keyword_is_blocked() {
+        // Characterization test, not a desired behavior: check_blocked scans the whole
+        // uppercased statement text, including inside string literals, so a literal
+        // value that happens to contain a blocked keyword as a whole word is wrongly
+        // rejected. This is a known, accepted gap fixed by the Phase 2 allowlist
+        // rewrite (which only inspects the leading statement keyword) — documented
+        // here so the fix is a visible behavior change, not a silent one.
+        assert!(matches!(
+            PostgresDb::check_blocked("SELECT 'DROP TABLE users' AS example"),
+            Err(DbError::BlockedKeyword { .. })
+        ));
+    }
+}
