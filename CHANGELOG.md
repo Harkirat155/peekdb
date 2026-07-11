@@ -9,6 +9,9 @@ All notable changes to this project are documented here.
 - Phase 0 UX: `init`, `doctor`, `config list`, `mcp-snippet`, shell `completions`
 - Config discovery: `--config` → `$PEEKDB_CONFIG` → `./databases.toml` → `~/.config/peekdb/databases.toml`
 - Product landing page (`docs/`) for GitHub Pages + public `ROADMAP.md`
+- Phase 1 agent DX: `list_targets`, `list_objects`, `describe_object`, `sample_object`
+- MCP query tools default to structured JSON (`format: "table"` for ASCII)
+- MCP Resources: `peekdb://{target}/schema` and `…/tables|collections/{name}`
 
 ## [0.1.0] - 2026-07-11
 

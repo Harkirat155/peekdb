@@ -154,10 +154,20 @@ Passive schema context without tool spam. Shorter tool descriptions; point agent
 | Phase | Status |
 |-------|--------|
 | 0 Install / doctor / config UX | **Done** (`init`, `doctor`, `config list`, `mcp-snippet`, completions, config discovery) |
-| 1 Agent schema tools + JSON | Planned |
-| 2 Safety controls | Planned |
+| 1 Agent schema tools + JSON | **Done** (discovery tools, JSON envelopes, MCP resources) |
+| 2 Safety controls | Next |
 | 3 REPL / TUI | Planned |
 | 4 Platform | Ongoing |
 | Landing page | Shipped (`docs/` → GitHub Pages) → [site](https://harkirat155.github.io/peekdb/) |
+
+### Learnings from Phase 0–1 build
+
+1. **Discovery should ride `execute_*`** — list/describe/sample call the same audited RO path as queries. No parallel connection API = no audit gaps.
+2. **Fewer tools beat per-backend clones** — `list_objects` / `describe_object` / `sample_object` resolve backend from unique target names (config already forbids name collisions).
+3. **JSON default is a deliberate MCP break** — agents parse structured `columns`/`rows`/`meta`; humans use CLI tables or `format: "table"`.
+4. **Identifier allowlist for sample SQL** — only `[A-Za-z_][A-Za-z0-9_]*` (optional `schema.table`); never string-interpolate free-form names.
+5. **Redis SCAN is one cursor step** — full keyspace dump is an anti-pattern; pattern refinement is the UX.
+6. **`list_targets` is pure config** — no audit line (nothing hit a database). Document that for operators reading audit logs.
+7. **Landing + Pages ship independently of binary** — `docs/` workflow; enable Actions Pages once on the repo.
 
 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Prefer opening an issue against a phase item before a large PR.

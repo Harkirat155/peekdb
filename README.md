@@ -276,8 +276,20 @@ Add to `~/.claude/mcp.json` (or the Claude Desktop / Cursor equivalent):
 }
 ```
 
-Once configured, the AI has access to the `sql_query`, `mongo_query`, and `redis_query`
-tools and can explore schema and data across all configured databases.
+Once configured, the AI has discovery tools first (`list_targets`, `list_objects`,
+`describe_object`, `sample_object`), then `sql_query` / `mongo_query` / `redis_query`.
+Query tools return **structured JSON by default** (columns/rows + meta); pass
+`"format": "table"` for ASCII. Schema is also exposed as MCP resources
+(`peekdb://{target}/schema`, `peekdb://{target}/tables/{name}`).
+
+### `list_targets` / `list_objects` / `describe_object` / `sample_object`
+
+| Tool | Purpose |
+|------|---------|
+| `list_targets` | Configured names + backend (`postgres` / `mongo` / `redis`) |
+| `list_objects` | Tables, collections, or Redis `SCAN` (pattern optional) |
+| `describe_object` | Columns/indexes (PG), inferred fields+indexes (Mongo), TYPE/TTL (Redis) |
+| `sample_object` | Sample rows/docs (PG/Mongo only) |
 
 ### `sql_query` (PostgreSQL)
 

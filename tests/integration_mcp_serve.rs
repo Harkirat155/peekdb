@@ -143,9 +143,26 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
         .iter()
         .map(|t| t["name"].as_str().unwrap().to_string())
         .collect();
+    assert!(tools.contains(&"list_targets".to_string()));
+    assert!(tools.contains(&"list_objects".to_string()));
+    assert!(tools.contains(&"describe_object".to_string()));
+    assert!(tools.contains(&"sample_object".to_string()));
     assert!(tools.contains(&"sql_query".to_string()));
     assert!(tools.contains(&"mongo_query".to_string()));
     assert!(tools.contains(&"redis_query".to_string()));
+
+    // Discovery: list_targets is in-process (no audit line).
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 20, "method": "tools/call",
+            "params": {"name": "list_targets", "arguments": {}}
+        }),
+    );
+    let resp = read_frame(&mut reader);
+    assert_ne!(resp["result"]["isError"], json!(true));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("postgres") && text.contains("mongo") && text.contains("redis"));
 
     // Allowed SQL query succeeds over MCP, same as the direct `query` subcommand.
     send_frame(
@@ -236,15 +253,18 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
     let status = child.wait().expect("wait for server to exit");
     assert!(status.success());
 
-    // Audit logging must cover the MCP path identically to the CLI path: one line per
-    // call (6 tools/call requests above), source "mcp", all blocked calls recorded, and
-    // never a connection string/password anywhere in the file.
+    // Audit logging covers execute paths (list_targets is pure config — no audit line).
+    // 6 query tools/call requests still produce 6 audit lines; discovery list_targets does not.
     let contents = std::fs::read_to_string(&audit_path).expect("audit log was written");
     let lines: Vec<serde_json::Value> = contents
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 6, "expected one audit line per tools/call");
+    assert_eq!(
+        lines.len(),
+        6,
+        "expected one audit line per backend tools/call (not list_targets)"
+    );
     assert!(lines.iter().all(|l| l["source"] == "mcp"));
     let outcomes: Vec<&str> = lines
         .iter()
