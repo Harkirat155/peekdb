@@ -30,6 +30,14 @@ pub enum DbError {
          (found '{leading}')"
     )]
     NotAllowedStatement { leading: String },
+    /// Data-modifying SQL nested inside an otherwise allowlisted statement (e.g. a
+    /// `WITH … AS (DELETE … RETURNING *)` CTE, or `WITH … INSERT …`). Rejected
+    /// client-side so agents get a clear block instead of a Postgres READ ONLY error.
+    #[error(
+        "Blocked: write keyword '{keyword}' is not allowed inside this statement \
+         (data-modifying CTEs and other embedded DML are rejected client-side)"
+    )]
+    EmbeddedWrite { keyword: String },
     #[error("Query failed: {0}")]
     QueryFailed(String),
     #[error("Connection failed: {0}")]
@@ -40,6 +48,94 @@ pub enum DbError {
     RateLimited(String),
     #[error("Response too large: {0}")]
     ResponseTooLarge(String),
+}
+
+impl DbError {
+    /// Stable machine code for agents / MCP structured errors.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::BlockedKeyword { .. } => "blocked_keyword",
+            Self::MultipleStatements => "multiple_statements",
+            Self::NotAllowedStatement { .. } => "not_allowed_statement",
+            Self::EmbeddedWrite { .. } => "embedded_write",
+            Self::QueryFailed(_) => "query_failed",
+            Self::ConnectionFailed(_) => "connection_failed",
+            Self::NotAllowedObject { .. } => "not_allowed_object",
+            Self::RateLimited(_) => "rate_limited",
+            Self::ResponseTooLarge(_) => "response_too_large",
+        }
+    }
+
+    /// Which enforcement layer produced this error (for agent debugging).
+    pub fn layer(&self) -> &'static str {
+        match self {
+            Self::BlockedKeyword { .. } => "command_or_stage_allowlist",
+            Self::MultipleStatements => "single_statement",
+            Self::NotAllowedStatement { .. } => "statement_allowlist",
+            Self::EmbeddedWrite { .. } => "embedded_write_scan",
+            Self::QueryFailed(_) => "database",
+            Self::ConnectionFailed(_) => "connection",
+            Self::NotAllowedObject { .. } => "object_allowlist",
+            Self::RateLimited(_) => "rate_limit",
+            Self::ResponseTooLarge(_) => "response_cap",
+        }
+    }
+
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::BlockedKeyword { .. } => {
+                Some("Use only allowlisted read operations/commands for this backend")
+            }
+            Self::MultipleStatements => {
+                Some("Send one statement per call; do not chain with semicolons")
+            }
+            Self::NotAllowedStatement { .. } => {
+                Some("Leading keyword must be SELECT, WITH, EXPLAIN, SHOW, VALUES, or TABLE")
+            }
+            Self::EmbeddedWrite { .. } => {
+                Some("Remove INSERT/UPDATE/DELETE/MERGE (and other writes) from CTEs and the main query body")
+            }
+            Self::NotAllowedObject { .. } => {
+                Some("Query an object on this target's allowlist, or ask an operator to expand allow_tables/allow_collections")
+            }
+            Self::RateLimited(_) => Some("Back off and retry; lower max_rows or call rate"),
+            Self::ResponseTooLarge(_) => {
+                Some("Lower max_rows/limit or raise max_response_bytes on the target")
+            }
+            Self::QueryFailed(_) | Self::ConnectionFailed(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DbError;
+
+    #[test]
+    fn agent_meta_covers_embedded_write() {
+        let e = DbError::EmbeddedWrite {
+            keyword: "DELETE".into(),
+        };
+        assert_eq!(e.code(), "embedded_write");
+        assert_eq!(e.layer(), "embedded_write_scan");
+        assert!(e.hint().is_some());
+        assert!(e.to_string().contains("DELETE"));
+    }
+
+    #[test]
+    fn agent_meta_covers_allowlist_and_rate_limit() {
+        assert_eq!(
+            DbError::NotAllowedStatement {
+                leading: "INSERT".into()
+            }
+            .code(),
+            "not_allowed_statement"
+        );
+        assert_eq!(
+            DbError::RateLimited("slow down".into()).layer(),
+            "rate_limit"
+        );
+    }
 }
 
 #[async_trait]

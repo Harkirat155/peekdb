@@ -255,6 +255,31 @@ async fn explain_analyze_wrapping_a_write_is_still_rejected_end_to_end() {
 
 #[tokio::test]
 #[ignore]
+async fn data_modifying_cte_is_rejected_before_postgres() {
+    // Classic smuggle: WITH starts allowlisted, CTE body writes. Must fail client-side
+    // (EmbeddedWrite), not only via the READ ONLY transaction backstop.
+    setup_widgets().await;
+    let d = db();
+    let result = d
+        .execute_query(
+            "WITH d AS (DELETE FROM widgets RETURNING *) SELECT count(*) FROM d",
+            500,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(DbError::EmbeddedWrite { .. })),
+        "expected EmbeddedWrite, got {result:?}"
+    );
+
+    let check = d
+        .execute_query("SELECT count(*) AS c FROM widgets", 500)
+        .await
+        .unwrap();
+    assert_eq!(check.rows[0][0], Some("3".to_string()));
+}
+
+#[tokio::test]
+#[ignore]
 async fn statement_timeout_actually_aborts_a_slow_query() {
     // Proves the connect-time `SET SESSION statement_timeout` really takes effect —
     // not just that the config plumbing compiles. pg_sleep(2) with a 200ms timeout

@@ -144,6 +144,7 @@ impl Database for AuditedDatabase {
             Err(
                 e @ (DbError::BlockedKeyword { .. }
                 | DbError::NotAllowedStatement { .. }
+                | DbError::EmbeddedWrite { .. }
                 | DbError::MultipleStatements
                 | DbError::NotAllowedObject { .. }
                 | DbError::RateLimited(_)),
