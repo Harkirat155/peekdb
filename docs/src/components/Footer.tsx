@@ -2,8 +2,9 @@ export function Footer() {
   return (
     <footer className="footer">
       <div className="container footer-inner">
-        <p>peekdb · MIT · built for agents that should only look</p>
+        <p>peekdb · MIT · read-only by construction</p>
         <div className="footer-links">
+          <a href="/peekdb/llms.txt">llms.txt</a>
           <a href="https://github.com/Harkirat155/peekdb" target="_blank" rel="noreferrer">
             GitHub
           </a>

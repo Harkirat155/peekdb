@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+
+# Machine-readable product brief for coding agents
+# https://harkirat155.github.io/peekdb/llms.txt
+
+Sitemap: https://harkirat155.github.io/peekdb/sitemap.xml

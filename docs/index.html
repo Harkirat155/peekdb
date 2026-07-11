@@ -3,23 +3,34 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>peekdb — Peek any database. Never write.</title>
+    <title>peekdb — Read-only CLI &amp; MCP for Postgres, MongoDB, Redis</title>
     <meta
       name="description"
-      content="Enforced read-only CLI and MCP server for Postgres, MongoDB, and Redis. Safe database access for you and your coding agent — by construction, not by prompt."
+      content="peekdb: enforced read-only CLI and MCP server for Postgres, MongoDB, and Redis. Safe schema/data access for coding agents (Claude, Cursor, Grok) and humans — by construction, not by prompt."
     />
-    <meta name="robots" content="index, follow" />
+    <meta
+      name="keywords"
+      content="peekdb, MCP, read-only database, Postgres, MongoDB, Redis, Claude Code, Cursor, AI coding agent, SQL CLI, database security"
+    />
+    <meta name="author" content="Harkirat Singh" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
+    <meta name="theme-color" content="#07090f" />
+    <meta name="color-scheme" content="dark" />
     <link rel="canonical" href="https://harkirat155.github.io/peekdb/" />
     <link rel="icon" type="image/svg+xml" href="/peekdb/favicon.svg" />
+    <link rel="alternate" type="text/plain" title="llms.txt" href="/peekdb/llms.txt" />
 
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="peekdb" />
     <meta property="og:url" content="https://harkirat155.github.io/peekdb/" />
     <meta property="og:title" content="peekdb — Peek any database. Never write." />
     <meta
       property="og:description"
-      content="Enforced read-only CLI + MCP for Postgres, MongoDB, and Redis. For you and your coding agent."
+      content="Enforced read-only CLI + MCP for Postgres, MongoDB, and Redis. Multi-layer write blocking, audit log, agent discovery tools."
     />
     <meta property="og:image" content="https://harkirat155.github.io/peekdb/og-image.svg" />
+    <meta property="og:image:alt" content="peekdb — Peek any database. Never write." />
+    <meta property="og:locale" content="en_US" />
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="peekdb — Peek any database. Never write." />
@@ -29,14 +40,89 @@
     />
     <meta name="twitter:image" content="https://harkirat155.github.io/peekdb/og-image.svg" />
 
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "SoftwareApplication",
+            "name": "peekdb",
+            "applicationCategory": "DeveloperApplication",
+            "operatingSystem": "Linux, macOS, Windows",
+            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+            "license": "https://opensource.org/licenses/MIT",
+            "url": "https://harkirat155.github.io/peekdb/",
+            "downloadUrl": "https://github.com/Harkirat155/peekdb/releases",
+            "codeRepository": "https://github.com/Harkirat155/peekdb",
+            "description": "Enforced read-only CLI and MCP server for Postgres, MongoDB, and Redis. Safe for AI coding agents.",
+            "softwareVersion": "0.1.0",
+            "author": {
+              "@type": "Person",
+              "name": "Harkirat Singh",
+              "url": "https://harkirat155.github.io/"
+            },
+            "keywords": "MCP, read-only database, Postgres, MongoDB, Redis, Claude, Cursor"
+          },
+          {
+            "@type": "WebSite",
+            "name": "peekdb",
+            "url": "https://harkirat155.github.io/peekdb/",
+            "description": "Product landing for peekdb"
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "Can an agent write to the database through peekdb?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "No. Writes are rejected by multi-layer allowlists and Postgres READ ONLY transactions. There is no write mode."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Which MCP tools does peekdb expose?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "list_targets, list_objects, describe_object, sample_object, sql_query, mongo_query, redis_query. Call list_targets first."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How do I install peekdb for an agent?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "cargo install --git https://github.com/Harkirat155/peekdb then peekdb init, peekdb doctor, peekdb mcp-snippet. Full agent brief: https://harkirat155.github.io/peekdb/llms.txt"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
   </head>
   <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <noscript>
+      <main style="max-width: 40rem; margin: 2rem auto; padding: 0 1rem; font-family: system-ui">
+        <h1>peekdb</h1>
+        <p>
+          Enforced read-only CLI and MCP for Postgres, MongoDB, and Redis. Enable JavaScript for
+          the full site, or read the machine brief:
+        </p>
+        <ul>
+          <li><a href="/peekdb/llms.txt">llms.txt</a> (for coding agents)</li>
+          <li><a href="https://github.com/Harkirat155/peekdb">GitHub</a></li>
+          <li><a href="https://github.com/Harkirat155/peekdb#readme">README</a></li>
+        </ul>
+        <pre>
+cargo install --git https://github.com/Harkirat155/peekdb
+peekdb init &amp;&amp; peekdb doctor &amp;&amp; peekdb mcp-snippet
+        </pre>
+        <p>MCP tools: list_targets → list_objects → describe_object → sample_object → sql_query / mongo_query / redis_query</p>
+      </main>
+    </noscript>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

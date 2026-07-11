@@ -159,6 +159,92 @@
   }
 }
 
+.inline-code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: var(--accent-ink);
+}
+
+.agent-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+@media (min-width: 900px) {
+  .agent-grid {
+    grid-template-columns: 1fr 1.2fr;
+  }
+}
+
+.agent-card .agent-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 1.25rem;
+}
+
+.tool-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.tool-list li {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #05070c;
+}
+
+.tool-list code {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--accent-ink);
+  font-weight: 500;
+}
+
+.tool-list span {
+  font-size: 0.85rem;
+  color: var(--fg-muted);
+}
+
+.muted-line {
+  margin-top: 1rem;
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+}
+
+.muted-line code {
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+  color: var(--fg-muted);
+}
+
+.install-footnote {
+  margin-top: 1.25rem;
+  color: var(--fg-dim);
+  font-size: 0.9rem;
+}
+
+.install-footnote a {
+  color: var(--accent-ink);
+}
+
+.install-footnote a:hover {
+  text-decoration: underline;
+}
+
+.code-block pre code {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  white-space: pre;
+}
+
 .card h3 {
   font-family: var(--font-display);
   font-size: 1.15rem;

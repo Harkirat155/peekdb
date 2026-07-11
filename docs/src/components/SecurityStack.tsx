@@ -2,32 +2,34 @@ const LAYERS = [
   {
     n: "01",
     title: "Statement / command allowlist",
-    body: "Only SELECT-family SQL, read Mongo ops, and read Redis commands ever leave the process.",
+    body: "SELECT-family SQL only; Mongo read ops; Redis deny-by-default reads. Nested $out/$merge blocked anywhere in a pipeline.",
   },
   {
     n: "02",
-    title: "Session read-only",
-    body: "Postgres opens with SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY.",
+    title: "Session + transaction RO",
+    body: "Postgres: SET SESSION … READ ONLY and BEGIN TRANSACTION READ ONLY … ROLLBACK on every call.",
   },
   {
     n: "03",
-    title: "Transaction backstop",
-    body: "Every query runs inside BEGIN TRANSACTION READ ONLY … ROLLBACK. Escalation is blocked by the engine.",
+    title: "Optional product controls",
+    body: "Table/collection allowlists, rate limits, max response bytes, column/PII redaction — config-driven, off by default.",
   },
   {
     n: "04",
     title: "Append-only audit",
-    body: "Allowed, blocked, or failed — every call lands in JSONL. Independent of RUST_LOG.",
+    body: "Every call (allowed, blocked, failed) lands in JSONL. Independent of RUST_LOG. peekdb audit filters the trail.",
   },
 ];
 
 export function SecurityStack() {
   return (
-    <section className="section" id="security">
+    <section className="section" id="security" aria-labelledby="security-title">
       <div className="container">
         <div className="section-head center">
           <p className="eyebrow">security model</p>
-          <h2 className="section-title">Layers, not vibes</h2>
+          <h2 className="section-title" id="security-title">
+            Layers, not vibes
+          </h2>
           <p className="section-lead">
             Prompt injection can talk an agent into trying a write. It cannot talk peekdb into
             executing one.

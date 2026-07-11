@@ -9,9 +9,11 @@ export function Nav() {
         </a>
         <nav className="nav-links" aria-label="Primary">
           <a href="#features">Features</a>
+          <a href="#for-agents">Agents</a>
           <a href="#security">Security</a>
           <a href="#install">Install</a>
           <a href="#faq">FAQ</a>
+          <a href="/peekdb/llms.txt">llms.txt</a>
         </nav>
         <div className="nav-actions">
           <a className="btn btn-ghost" href={GH} target="_blank" rel="noreferrer">

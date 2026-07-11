@@ -1,5 +1,6 @@
 import { Faq } from "./components/Faq";
 import { Footer } from "./components/Footer";
+import { ForAgents } from "./components/ForAgents";
 import { Hero } from "./components/Hero";
 import { Install } from "./components/Install";
 import { Nav } from "./components/Nav";
@@ -8,34 +9,60 @@ import { SecurityStack } from "./components/SecurityStack";
 const FEATURES = [
   {
     label: "agents",
+    title: "Discovery before guesses",
+    body: "list_targets → list_objects → describe/sample → query. Structured JSON results by default. MCP resources for schema context.",
+  },
+  {
+    label: "security",
     title: "Prompt injection hits a wall",
-    body: "Multi-layer allowlists and engine-level READ ONLY mean a clever prompt cannot escalate to INSERT, DROP, or FLUSHALL.",
+    body: "Multi-layer RO: statement allowlists, Postgres READ ONLY transactions, nested Mongo $out/$merge block, Redis deny-by-default.",
+  },
+  {
+    label: "controls",
+    title: "Production-shaped knobs",
+    body: "Optional allow_tables, rate limits, max_response_bytes, redact_columns — plus append-only audit and peekdb audit filters.",
+  },
+  {
+    label: "humans",
+    title: "CLI, REPL, explore",
+    body: "query/mongo/redis with --format table|vertical|csv|tsv|json. Interactive repl and explore for the same safe backends.",
   },
   {
     label: "credentials",
     title: "Secrets stay out of files",
-    body: "${ENV_VAR} interpolation is required. Literal passwords in TOML are rejected unless you opt in for local-only hacks.",
+    body: "${ENV_VAR} interpolation required. Literal passwords rejected unless you opt in for local-only hacks.",
   },
   {
-    label: "vs psql",
-    title: "Built for the IDE loop",
-    body: "One binary, three backends, MCP + CLI, row caps, timeouts, and an audit trail. Not a general DBA shell — a safe peek.",
+    label: "one binary",
+    title: "MCP + CLI parity",
+    body: "init, doctor, mcp-snippet, fav, completions. Same enforcement whether the caller is an agent or a shell.",
   },
 ];
 
 const STEPS = [
   {
     title: "Configure targets",
-    body: "Name your Postgres, Mongo, and Redis instances in databases.toml. Use env vars for passwords.",
+    body: "peekdb init → databases.toml with Postgres, Mongo, Redis. Passwords via ${ENV_VAR}. peekdb doctor to probe.",
   },
   {
-    title: "Serve or query",
-    body: "peekdb serve for MCP clients, or peekdb query / mongo / redis for one-shot peeks from the shell.",
+    title: "Wire MCP or shell",
+    body: "peekdb mcp-snippet into Claude/Cursor, or use query / repl / explore directly.",
   },
   {
-    title: "Let the agent explore",
-    body: "The model gets sql_query, mongo_query, and redis_query — and nothing that mutates state.",
+    title: "Explore safely",
+    body: "Agents call discovery tools first. Humans use \\dt / sample. Writes never leave the allowlist.",
   },
+];
+
+const TRUST = [
+  "Postgres",
+  "MongoDB",
+  "Redis",
+  "MCP + CLI",
+  "REPL · explore",
+  "Audit log",
+  "Allowlists · redact",
+  "MIT",
 ];
 
 export default function App() {
@@ -43,12 +70,12 @@ export default function App() {
     <div className="site">
       <div className="aurora" aria-hidden />
       <Nav />
-      <main>
+      <main id="main">
         <Hero />
 
-        <section className="trust">
+        <section className="trust" aria-label="Product highlights">
           <div className="container trust-inner">
-            {["Postgres", "MongoDB", "Redis", "MCP + CLI", "Audit log", "MIT"].map((c) => (
+            {TRUST.map((c) => (
               <span className="chip" key={c}>
                 {c}
               </span>
@@ -56,14 +83,16 @@ export default function App() {
           </div>
         </section>
 
-        <section className="section" id="features">
+        <section className="section" id="features" aria-labelledby="features-title">
           <div className="container">
             <div className="section-head">
               <p className="eyebrow">why peekdb</p>
-              <h2 className="section-title">Useful to you first</h2>
+              <h2 className="section-title" id="features-title">
+                Useful to you — and your agent
+              </h2>
               <p className="section-lead">
-                Built for the moment an agent needs real schema and data — without trusting a
-                prompt to stay polite.
+                Phases 0–3 shipped: install UX, agent discovery, safety controls, interactive
+                surfaces. No write path. Ever.
               </p>
             </div>
             <div className="grid-3">
@@ -78,11 +107,15 @@ export default function App() {
           </div>
         </section>
 
-        <section className="section">
+        <ForAgents />
+
+        <section className="section" aria-labelledby="workflow-title">
           <div className="container">
             <div className="section-head center">
               <p className="eyebrow">workflow</p>
-              <h2 className="section-title">Three steps</h2>
+              <h2 className="section-title" id="workflow-title">
+                Three steps
+              </h2>
             </div>
             <div className="steps">
               {STEPS.map((s) => (
@@ -100,10 +133,15 @@ export default function App() {
         <Faq />
 
         <div className="container">
-          <section className="cta-band">
-            <h2>Give your agent eyes. Keep its hands off.</h2>
+          <section className="cta-band" aria-labelledby="cta-title">
+            <h2 id="cta-title">Give your agent eyes. Keep its hands off.</h2>
             <p>
-              Same binary for you in the terminal and for Claude, Cursor, or any MCP client.
+              Same binary for the terminal and for Claude, Cursor, Grok, or any MCP client. Start
+              with{" "}
+              <a href="/peekdb/llms.txt" style={{ color: "var(--accent-ink)" }}>
+                llms.txt
+              </a>{" "}
+              if you are an agent.
             </p>
             <div className="hero-ctas">
               <a className="btn btn-primary" href="#install">

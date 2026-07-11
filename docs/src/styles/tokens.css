@@ -2,9 +2,9 @@
   --bg: #07090f;
   --bg-elevated: #0d111a;
   --bg-card: #111827;
-  --fg: #e8ecf4;
-  --fg-muted: #8b95a8;
-  --fg-dim: #5c667a;
+  --fg: #eef2f8;
+  --fg-muted: #a8b2c5;
+  --fg-dim: #8b95a8;
   --border: rgba(232, 236, 244, 0.08);
   --border-strong: rgba(232, 236, 244, 0.14);
   --accent: #6ee7b7;
@@ -16,9 +16,10 @@
   --aurora-1: rgba(52, 211, 153, 0.18);
   --aurora-2: rgba(96, 165, 250, 0.12);
   --aurora-3: rgba(167, 139, 250, 0.1);
-  --font-display: "Bricolage Grotesque", system-ui, sans-serif;
-  --font-body: Inter, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  /* System stacks avoid render-blocking webfonts (CWV-friendly). */
+  --font-display: ui-rounded, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, monospace;
   --radius: 12px;
   --radius-lg: 20px;
   --max: 64rem;
@@ -77,6 +78,23 @@ svg {
 :focus-visible {
   outline: 2px solid var(--accent-ink);
   outline-offset: 3px;
+}
+
+.skip-link {
+  position: absolute;
+  left: 0.75rem;
+  top: -100px;
+  z-index: 100;
+  padding: 0.5rem 0.85rem;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #042f1e;
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.skip-link:focus {
+  top: 0.75rem;
 }
 
 ::selection {
