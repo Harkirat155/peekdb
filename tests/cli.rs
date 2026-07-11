@@ -19,7 +19,10 @@ fn help_flag_succeeds() {
         .stdout(predicate::str::contains("query"))
         .stdout(predicate::str::contains("mongo"))
         .stdout(predicate::str::contains("redis"))
-        .stdout(predicate::str::contains("serve"));
+        .stdout(predicate::str::contains("serve"))
+        .stdout(predicate::str::contains("init"))
+        .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("mcp-snippet"));
 }
 
 #[test]
@@ -82,11 +85,82 @@ fn redis_disallowed_command_is_rejected_without_needing_a_live_server() {
 }
 
 #[test]
-fn query_missing_required_config_flag_fails() {
+fn query_without_config_fails_when_none_discoverable() {
+    // Isolate from the developer's local databases.toml / PEEKDB_CONFIG.
+    let tmp = tempfile::tempdir().unwrap();
     bin()
+        .current_dir(tmp.path())
+        .env_remove("PEEKDB_CONFIG")
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("xdg"))
         .args(["query", "--sql", "SELECT 1"])
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicate::str::contains("No config found"));
+}
+
+#[test]
+fn init_writes_config_and_config_list_masks_secrets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("databases.toml");
+    bin()
+        .args(["init", "--path", cfg.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Wrote"));
+    assert!(cfg.is_file());
+
+    // Force-overwrite path works.
+    bin()
+        .args(["init", "--path", cfg.to_str().unwrap(), "--force"])
+        .assert()
+        .success();
+
+    // Inject a literal-password entry with allow flag, ensure list masks it.
+    let mut contents = std::fs::read_to_string(&cfg).unwrap();
+    contents.push_str(
+        r#"
+
+[[database]]
+name = "secret-db"
+url = "postgres://app:hunter2@db.example:5432/app"
+allow_literal_password = true
+"#,
+    );
+    std::fs::write(&cfg, contents).unwrap();
+
+    bin()
+        .args(["config", "list", "--config", cfg.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("secret-db"))
+        .stdout(predicate::str::contains("***"))
+        .stdout(predicate::str::contains("hunter2").not());
+}
+
+#[test]
+fn mcp_snippet_prints_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("databases.toml");
+    bin()
+        .args(["init", "--path", cfg.to_str().unwrap()])
+        .assert()
+        .success();
+    bin()
+        .args(["mcp-snippet", "--config", cfg.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mcpServers"))
+        .stdout(predicate::str::contains("peekdb"));
+}
+
+#[test]
+fn completions_zsh_succeeds() {
+    bin()
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("peekdb"));
 }
 
 #[test]

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Phase 0 UX: `init`, `doctor`, `config list`, `mcp-snippet`, shell `completions`
+- Config discovery: `--config` → `$PEEKDB_CONFIG` → `./databases.toml` → `~/.config/peekdb/databases.toml`
+- Product landing page (`docs/`) for GitHub Pages + public `ROADMAP.md`
+
 ## [0.1.0] - 2026-07-11
 
 ### Added

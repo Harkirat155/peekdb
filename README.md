@@ -1,5 +1,7 @@
 # peekdb
 
+**[Website](https://harkirat155.github.io/peekdb/)** · **[Roadmap](ROADMAP.md)** · **[Releases](https://github.com/Harkirat155/peekdb/releases)**
+
 A CLI (and MCP server) that gives you — or an AI coding agent — **read-only** access to
 Postgres, MongoDB, and Redis, with the read-only guarantee enforced by the tool itself, not
 left to good behavior.
@@ -54,11 +56,15 @@ cargo build --no-default-features --release
 
 ## Quick start (direct CLI)
 
-Copy the example config and fill in your connection details:
+Scaffold a config (recommended) or copy the example:
 
 ```bash
+peekdb init                                 # writes ~/.config/peekdb/databases.toml
+# or:
 cp databases.toml.example databases.toml   # gitignored — never committed
 ```
+
+Config discovery (first match wins): `--config` → `$PEEKDB_CONFIG` → `./databases.toml` → `~/.config/peekdb/databases.toml`.
 
 ```toml
 [[database]]
@@ -167,16 +173,32 @@ itself. A literal password in `databases.toml` is rejected at load time unless
 peekdb <COMMAND>
 
 Commands:
-  query   Run a read-only SQL statement against a configured PostgreSQL database
-  mongo   Run a read-only operation against a configured MongoDB database
-  redis   Run a read-only command against a configured Redis instance
-  serve   Start the MCP (Model Context Protocol) server over stdio
+  query         Run a read-only SQL statement against a configured PostgreSQL database
+  mongo         Run a read-only operation against a configured MongoDB database
+  redis         Run a read-only command against a configured Redis instance
+  serve         Start the MCP (Model Context Protocol) server over stdio
+  init          Create a starter databases.toml
+  doctor        Probe every configured target
+  config list   List targets with secrets masked
+  mcp-snippet   Print a ready-to-paste MCP client config
+  completions   Generate shell completions (bash/zsh/fish/…)
+```
+
+### `init` / `doctor` / `config` / `mcp-snippet`
+
+```bash
+peekdb init                          # ~/.config/peekdb/databases.toml
+peekdb init --path ./databases.toml
+peekdb doctor                        # SELECT 1 / list_collections / PING
+peekdb config list                   # secrets masked
+peekdb mcp-snippet                   # Claude / Cursor JSON
+peekdb completions zsh > _peekdb
 ```
 
 ### `query` (PostgreSQL)
 
 ```
-peekdb query --config <PATH> [--db <NAME>] [--sql <SQL>] [--max-rows <N>] [--json]
+peekdb query [--config <PATH>] [--db <NAME>] [--sql <SQL>] [--max-rows <N>] [--json]
 ```
 
 `--sql` reads from stdin if omitted, so piping/heredocs work:
