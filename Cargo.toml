@@ -1,6 +1,6 @@
 [package]
 name = "peekdb"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Fast, read-only CLI (and MCP server) for safely exploring Postgres, MongoDB, and Redis"
 license = "MIT"

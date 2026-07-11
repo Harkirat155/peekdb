@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-11
+
 ### Added
 
 - Phase 0 UX: `init`, `doctor`, `config list`, `mcp-snippet`, shell `completions`
