@@ -1,0 +1,91 @@
+name: Release
+
+# Builds and publishes prebuilt binaries to a GitHub Release when a `v*` tag is pushed.
+# This workflow does NOT touch crates.io — see CONTRIBUTING.md / RELEASING.md for the
+# manual `cargo publish` step, which is deliberately not automated here.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          # Native arm64 Linux hosted runner (GA for public repos as of early 2025).
+          # If this repo is private on a plan without arm64 Linux runners, drop this entry.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install OpenSSL dev headers (Linux only — native-tls needs them)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Build release binaries
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin_dir="target/${{ matrix.target }}/release"
+          out="peekdb-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "$out"
+          cp "$bin_dir/peekdb" "$out/"
+          cp "$bin_dir/mcp-db-readonly" "$out/"
+          cp README.md LICENSE CHANGELOG.md databases.toml.example "$out/"
+          tar -czf "$out.tar.gz" "$out"
+          shasum -a 256 "$out.tar.gz" > "$out.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peekdb-${{ matrix.target }}
+          path: |
+            peekdb-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            peekdb-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: true # review before publishing — see the release checklist in RELEASING.md
