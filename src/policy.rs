@@ -150,6 +150,16 @@ pub fn extract_sql_table_refs(sql: &str) -> Vec<String> {
     out
 }
 
+/// System catalogs used by discovery (list/describe). Not subject to user allowlists —
+/// the *target* table name is checked separately via `check_object_access`.
+pub fn is_system_catalog_ref(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("information_schema.")
+        || lower.starts_with("pg_catalog.")
+        || lower.starts_with("pg_")
+        || lower == "information_schema"
+}
+
 pub fn check_sql_allowlist(sql: &str, allow: &ObjectAllowlist) -> Result<(), DbError> {
     if allow.is_unrestricted() {
         return Ok(());
@@ -160,6 +170,9 @@ pub fn check_sql_allowlist(sql: &str, allow: &ObjectAllowlist) -> Result<(), DbE
         return Ok(());
     }
     for r in refs {
+        if is_system_catalog_ref(&r) {
+            continue;
+        }
         allow.check(&r)?;
     }
     Ok(())
@@ -532,6 +545,35 @@ mod tests {
         assert!(check_sql_allowlist("SELECT 1 FROM secrets", &a).is_err());
         assert!(check_sql_allowlist("SELECT 1 FROM users", &a).is_ok());
         assert!(check_sql_allowlist("SELECT 1", &a).is_ok());
+    }
+
+    #[test]
+    fn check_sql_allowlist_skips_information_schema_catalog() {
+        let a = ObjectAllowlist::new(vec!["users"]);
+        assert!(check_sql_allowlist(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
+            &a
+        )
+        .is_ok());
+        assert!(check_sql_allowlist(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'users'",
+            &a
+        )
+        .is_ok());
+        assert!(check_sql_allowlist(
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'users'",
+            &a
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn is_system_catalog_ref_detects_pg_and_information_schema() {
+        assert!(is_system_catalog_ref("information_schema.tables"));
+        assert!(is_system_catalog_ref("pg_indexes"));
+        assert!(is_system_catalog_ref("pg_catalog.pg_class"));
+        assert!(!is_system_catalog_ref("users"));
+        assert!(!is_system_catalog_ref("public.users"));
     }
 
     #[test]

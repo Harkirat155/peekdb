@@ -130,6 +130,10 @@ impl AuditedDatabase {
 
 #[async_trait]
 impl Database for AuditedDatabase {
+    fn check_object_access(&self, name: &str) -> Result<(), DbError> {
+        self.inner.check_object_access(name)
+    }
+
     async fn execute_query(&self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
         let start = Instant::now();
         let result = self.inner.execute_query(sql, max_rows).await;
@@ -191,6 +195,10 @@ impl AuditedMongo {
 
 #[async_trait]
 impl MongoDatabase for AuditedMongo {
+    fn check_object_access(&self, name: &str) -> Result<(), DbError> {
+        self.inner.check_object_access(name)
+    }
+
     async fn execute_mongo(&self, query: MongoQuery) -> Result<MongoResult, DbError> {
         let operation_desc = format!(
             "operation={:?} collection={:?}",

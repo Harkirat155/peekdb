@@ -90,6 +90,10 @@ impl PostgresDb {
         self
     }
 
+    pub fn allowlist(&self) -> &crate::policy::ObjectAllowlist {
+        &self.policy.allow_objects
+    }
+
     async fn ensure_connected(
         guard: &mut tokio::sync::MutexGuard<'_, Option<tokio_postgres::Client>>,
         name: &str,
@@ -254,6 +258,10 @@ fn strip_leading_explain(sql: &str) -> &str {
 
 #[async_trait]
 impl Database for PostgresDb {
+    fn check_object_access(&self, name: &str) -> Result<(), DbError> {
+        self.policy.allow_objects.check(name)
+    }
+
     async fn execute_query(&self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
         // Strip a single trailing semicolon, then reject any interior semicolons.
         // One statement per call: prevents chaining (e.g. "SET ...; INSERT ...").
@@ -523,5 +531,48 @@ mod tests {
         let _ = db.execute_query("SELECT 1", 1).await;
         let err = db.execute_query("SELECT 1", 1).await.unwrap_err();
         assert!(matches!(err, DbError::RateLimited(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn catalog_list_sql_under_allowlist_is_not_object_blocked() {
+        use crate::policy::{ObjectAllowlist, TargetPolicy};
+        let policy = TargetPolicy {
+            allow_objects: ObjectAllowlist::new(vec!["users"]),
+            ..Default::default()
+        };
+        let db = PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true).with_safety(policy, None);
+        let err = db
+            .execute_query(
+                "SELECT table_schema || '.' || table_name AS qname \
+                 FROM information_schema.tables \
+                 WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+                 ORDER BY 1",
+                100,
+            )
+            .await
+            .unwrap_err();
+        // Must reach the network layer (connection failed), NOT allowlist.
+        assert!(
+            !matches!(err, DbError::NotAllowedObject { .. }),
+            "catalog discovery SQL must not be allowlist-blocked, got {err:?}"
+        );
+        assert!(
+            matches!(err, DbError::ConnectionFailed(_) | DbError::QueryFailed(_)),
+            "expected connection/query failure after allowlist pass, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn check_object_access_respects_allowlist() {
+        use crate::policy::{ObjectAllowlist, TargetPolicy};
+        use crate::db::traits::Database;
+        let policy = TargetPolicy {
+            allow_objects: ObjectAllowlist::new(vec!["users"]),
+            ..Default::default()
+        };
+        let db = PostgresDb::new("t", "postgres://u@127.0.0.1:1/db", true).with_safety(policy, None);
+        assert!(db.check_object_access("users").is_ok());
+        assert!(db.check_object_access("public.users").is_ok());
+        assert!(db.check_object_access("secrets").is_err());
     }
 }

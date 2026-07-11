@@ -45,6 +45,11 @@ pub enum DbError {
 #[async_trait]
 pub trait Database: Send + Sync {
     async fn execute_query(&self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError>;
+
+    /// Object-level allowlist check (tables). Default unrestricted.
+    fn check_object_access(&self, _name: &str) -> Result<(), DbError> {
+        Ok(())
+    }
 }
 
 // ── MongoDB types ─────────────────────────────────────────────────────────────
@@ -101,6 +106,11 @@ pub struct MongoResult {
 #[async_trait]
 pub trait MongoDatabase: Send + Sync {
     async fn execute_mongo(&self, query: MongoQuery) -> Result<MongoResult, DbError>;
+
+    /// Collection-level allowlist check. Default unrestricted.
+    fn check_object_access(&self, _name: &str) -> Result<(), DbError> {
+        Ok(())
+    }
 }
 
 // ── Redis types ────────────────────────────────────────────────────────────────

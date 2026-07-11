@@ -87,10 +87,15 @@ pub async fn list_pg_tables(db: &dyn Database) -> Result<Vec<String>, DbError> {
                WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
                ORDER BY 1";
     let result = db.execute_query(sql, 2000).await?;
-    Ok(result
+    let names: Vec<String> = result
         .rows
         .into_iter()
         .filter_map(|r| r.first().cloned().flatten())
+        .collect();
+    // Allowlist filters discovery results (catalog SQL itself is exempt in check_sql_allowlist).
+    Ok(names
+        .into_iter()
+        .filter(|n| db.check_object_access(n).is_ok())
         .collect())
 }
 
@@ -99,6 +104,7 @@ pub async fn describe_pg_table(
     table: &str,
 ) -> Result<ObjectDescription, DbError> {
     validate_sql_ident(table)?;
+    db.check_object_access(table)?;
 
     let (schema_filter, name_filter) = match table.split_once('.') {
         Some((s, t)) => (s.to_string(), t.to_string()),
@@ -167,6 +173,8 @@ pub async fn sample_pg_table(
     table: &str,
     limit: usize,
 ) -> Result<QueryResult, DbError> {
+    validate_sql_ident(table)?;
+    db.check_object_access(table)?;
     let quoted = quote_sql_ident(table)?;
     let lim = limit.clamp(1, 100);
     let sql = format!("SELECT * FROM {quoted} LIMIT {lim}");
@@ -188,10 +196,12 @@ pub async fn list_mongo_collections(db: &dyn MongoDatabase) -> Result<Vec<String
             field: None,
         })
         .await?;
+    // execute_mongo already filters list_collections when allowlist is set; re-check for safety.
     Ok(result
         .documents
         .into_iter()
         .map(|s| s.trim_matches('"').to_string())
+        .filter(|n| db.check_object_access(n).is_ok())
         .collect())
 }
 
@@ -202,6 +212,7 @@ pub async fn describe_mongo_collection(
     if collection.is_empty() {
         return Err(DbError::QueryFailed("collection is required".into()));
     }
+    db.check_object_access(collection)?;
 
     let sample = db
         .execute_mongo(MongoQuery {
@@ -289,6 +300,7 @@ pub async fn sample_mongo_collection(
     if collection.is_empty() {
         return Err(DbError::QueryFailed("collection is required".into()));
     }
+    db.check_object_access(collection)?;
     db.execute_mongo(MongoQuery {
         collection: Some(collection.to_string()),
         operation: MongoOperation::Find,
@@ -450,6 +462,8 @@ pub fn redis_result_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::ObjectAllowlist;
+    use async_trait::async_trait;
 
     #[test]
     fn validate_sql_ident_accepts_simple_and_qualified() {
@@ -473,6 +487,67 @@ mod tests {
         assert_eq!(
             quote_sql_ident("public.users").unwrap(),
             "\"public\".\"users\""
+        );
+    }
+
+    /// Fake DB that returns a fixed table list and enforces an allowlist on access checks.
+    struct FakeListDb {
+        allow: ObjectAllowlist,
+        tables: Vec<String>,
+    }
+
+    #[async_trait]
+    impl Database for FakeListDb {
+        fn check_object_access(&self, name: &str) -> Result<(), DbError> {
+            self.allow.check(name)
+        }
+
+        async fn execute_query(
+            &self,
+            _sql: &str,
+            _max_rows: usize,
+        ) -> Result<QueryResult, DbError> {
+            Ok(QueryResult {
+                columns: vec!["qname".into()],
+                rows: self
+                    .tables
+                    .iter()
+                    .map(|t| vec![Some(t.clone())])
+                    .collect(),
+                row_count: self.tables.len(),
+                truncated: false,
+                command_tag: None,
+                redacted: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn list_pg_tables_filters_to_allowlist() {
+        let db = FakeListDb {
+            allow: ObjectAllowlist::new(vec!["users", "public.orders"]),
+            tables: vec![
+                "public.users".into(),
+                "public.orders".into(),
+                "public.secrets".into(),
+            ],
+        };
+        let listed = list_pg_tables(&db).await.unwrap();
+        assert!(listed.iter().any(|t| t == "public.users"));
+        assert!(listed.iter().any(|t| t == "public.orders"));
+        assert!(!listed.iter().any(|t| t.contains("secrets")));
+    }
+
+    #[tokio::test]
+    async fn describe_pg_table_denied_object_before_catalog_query() {
+        let db = FakeListDb {
+            allow: ObjectAllowlist::new(vec!["users"]),
+            tables: vec![],
+        };
+        let err = describe_pg_table(&db, "secrets").await.unwrap_err();
+        assert!(
+            matches!(err, DbError::NotAllowedObject { ref name } if name == "secrets"),
+            "got {err:?}"
         );
     }
 }

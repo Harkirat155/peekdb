@@ -54,6 +54,10 @@ impl MongoDb {
         self
     }
 
+    pub fn allowlist(&self) -> &crate::policy::ObjectAllowlist {
+        &self.policy.allow_objects
+    }
+
     async fn get_db(&self) -> Result<mongodb::Database, DbError> {
         let mut guard = self.client.lock().await;
         if guard.is_none() {
@@ -124,6 +128,51 @@ fn walk_bson_for_write_stages(value: &Bson) -> Result<(), DbError> {
     }
 }
 
+/// Enforce allowlist on collections referenced by `$lookup.from`, `$graphLookup.from`,
+/// `$unionWith.coll` (and nested pipelines).
+fn check_pipeline_allowlist(
+    pipeline: &[Document],
+    allow: &crate::policy::ObjectAllowlist,
+) -> Result<(), DbError> {
+    if allow.is_unrestricted() {
+        return Ok(());
+    }
+    for stage in pipeline {
+        walk_bson_for_collection_refs(&Bson::Document(stage.clone()), allow)?;
+    }
+    Ok(())
+}
+
+fn walk_bson_for_collection_refs(
+    value: &Bson,
+    allow: &crate::policy::ObjectAllowlist,
+) -> Result<(), DbError> {
+    match value {
+        Bson::Document(doc) => {
+            // $lookup / $graphLookup body: { from: "coll", as: ... }
+            // Stage form: { "$lookup": { "from": "coll", ... } } — walk recurses into value.
+            if let Some(Bson::String(from)) = doc.get("from") {
+                allow.check(from)?;
+            }
+            // $unionWith: { coll: "other", pipeline: [...] }
+            if let Some(Bson::String(coll)) = doc.get("coll") {
+                allow.check(coll)?;
+            }
+            for (_k, v) in doc.iter() {
+                walk_bson_for_collection_refs(v, allow)?;
+            }
+            Ok(())
+        }
+        Bson::Array(items) => {
+            for item in items {
+                walk_bson_for_collection_refs(item, allow)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn bson_to_json_string(b: &Bson) -> String {
     serde_json::to_string(b).unwrap_or_else(|_| "null".to_string())
 }
@@ -134,6 +183,10 @@ fn doc_to_json_string(d: &Document) -> String {
 
 #[async_trait]
 impl MongoDatabase for MongoDb {
+    fn check_object_access(&self, name: &str) -> Result<(), DbError> {
+        self.policy.allow_objects.check(name)
+    }
+
     async fn execute_mongo(&self, query: MongoQuery) -> Result<MongoResult, DbError> {
         if let Some(rate) = &self.rate {
             rate.check_call()?;
@@ -284,6 +337,7 @@ impl MongoDatabase for MongoDb {
                     .collect::<Result<_, _>>()?;
 
                 check_pipeline_readonly(&pipeline)?;
+                check_pipeline_allowlist(&pipeline, &self.policy.allow_objects)?;
 
                 let agg_opts = AggregateOptions::builder()
                     .max_time(Duration::from_millis(self.query_timeout_ms))
@@ -482,5 +536,77 @@ mod tests {
             Err(DbError::BlockedKeyword { keyword }) => assert_eq!(keyword, "$out"),
             other => panic!("expected deeply nested $out to be blocked, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lookup_from_denied_collection_is_blocked_by_allowlist() {
+        use crate::policy::ObjectAllowlist;
+        let allow = ObjectAllowlist::new(vec!["users"]);
+        let pipeline = vec![doc! {
+            "$lookup": {
+                "from": "secrets",
+                "localField": "id",
+                "foreignField": "user_id",
+                "as": "joined"
+            }
+        }];
+        match check_pipeline_allowlist(&pipeline, &allow) {
+            Err(DbError::NotAllowedObject { name }) => assert_eq!(name, "secrets"),
+            other => panic!("expected secrets lookup blocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lookup_from_allowed_collection_passes_allowlist() {
+        use crate::policy::ObjectAllowlist;
+        let allow = ObjectAllowlist::new(vec!["users", "orders"]);
+        let pipeline = vec![doc! {
+            "$lookup": {
+                "from": "orders",
+                "as": "o",
+                "pipeline": [{"$match": {}}]
+            }
+        }];
+        assert!(check_pipeline_allowlist(&pipeline, &allow).is_ok());
+    }
+
+    #[test]
+    fn union_with_denied_coll_is_blocked() {
+        use crate::policy::ObjectAllowlist;
+        let allow = ObjectAllowlist::new(vec!["users"]);
+        let pipeline = vec![doc! {
+            "$unionWith": { "coll": "secrets", "pipeline": [] }
+        }];
+        match check_pipeline_allowlist(&pipeline, &allow) {
+            Err(DbError::NotAllowedObject { name }) => assert_eq!(name, "secrets"),
+            other => panic!("expected unionWith secrets blocked, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn aggregate_lookup_denied_fails_before_connect() {
+        use crate::policy::{ObjectAllowlist, TargetPolicy};
+        let policy = TargetPolicy {
+            allow_objects: ObjectAllowlist::new(vec!["users"]),
+            ..Default::default()
+        };
+        let db = MongoDb::new("t", "mongodb://127.0.0.1:1/db", "db").with_safety(policy, None);
+        let q = MongoQuery {
+            collection: Some("users".into()),
+            operation: MongoOperation::Aggregate,
+            filter: None,
+            projection: None,
+            sort: None,
+            limit: 10,
+            pipeline: Some(
+                r#"[{"$lookup":{"from":"secrets","as":"x","pipeline":[]}}]"#.into(),
+            ),
+            field: None,
+        };
+        let err = db.execute_mongo(q).await.unwrap_err();
+        assert!(
+            matches!(err, DbError::NotAllowedObject { ref name } if name == "secrets"),
+            "got {err:?}"
+        );
     }
 }
