@@ -81,6 +81,7 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
         name = "pg"
         url = "host=localhost port=55432 user=testuser password=testpass dbname=testdb"
         no_tls = true
+        allow_literal_password = true
 
         [[mongo]]
         name = "mg"
@@ -89,9 +90,18 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
     )
     .unwrap();
 
+    let audit_dir = tempfile::tempdir().unwrap();
+    let audit_path = audit_dir.path().join("audit.jsonl");
+
     let bin = env!("CARGO_BIN_EXE_mcp-db-readonly");
     let mut child = Command::new(bin)
-        .args(["serve", "--config", config.path().to_str().unwrap()])
+        .args([
+            "serve",
+            "--config",
+            config.path().to_str().unwrap(),
+            "--audit-log",
+            audit_path.to_str().unwrap(),
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -150,7 +160,7 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
     assert!(resp["result"]["content"][0]["text"]
         .as_str()
         .unwrap()
-        .contains("Blocked"));
+        .contains("Not allowed"));
 
     // Allowed mongo find succeeds over MCP.
     send_frame(
@@ -184,4 +194,22 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
     drop(stdin); // EOF on stdin — server should shut down cleanly.
     let status = child.wait().expect("wait for server to exit");
     assert!(status.success());
+
+    // Audit logging must cover the MCP path identically to the CLI path: one line per
+    // call (4 tools/call requests above), source "mcp", both blocked calls recorded, and
+    // never a connection string/password anywhere in the file.
+    let contents = std::fs::read_to_string(&audit_path).expect("audit log was written");
+    let lines: Vec<serde_json::Value> = contents
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 4, "expected one audit line per tools/call");
+    assert!(lines.iter().all(|l| l["source"] == "mcp"));
+    let outcomes: Vec<&str> = lines
+        .iter()
+        .map(|l| l["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, vec!["ok", "blocked", "ok", "blocked"]);
+    assert!(!contents.contains("testpass"));
+    assert!(!contents.contains("host=localhost"));
 }

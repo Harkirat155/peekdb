@@ -3,16 +3,23 @@ use async_trait::async_trait;
 use futures::TryStreamExt;
 use mongodb::{
     bson::{Bson, Document},
-    options::{ClientOptions, FindOptions},
+    options::{AggregateOptions, ClientOptions, FindOptions},
     Client,
 };
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::info;
+
+/// Per-query `maxTimeMS` — guards against a runaway/looping agent driving an expensive
+/// find/aggregate. Applied per-call via `FindOptions`/`AggregateOptions`, not at connect
+/// time (Mongo has no server-side per-connection default the way Postgres does).
+const DEFAULT_QUERY_TIMEOUT_MS: u64 = 30_000;
 
 pub struct MongoDb {
     name: String,
     uri: String,
     dbname: String,
+    query_timeout_ms: u64,
     client: Mutex<Option<Client>>,
 }
 
@@ -22,8 +29,15 @@ impl MongoDb {
             name: name.into(),
             uri: uri.into(),
             dbname: dbname.into(),
+            query_timeout_ms: DEFAULT_QUERY_TIMEOUT_MS,
             client: Mutex::new(None),
         }
+    }
+
+    /// Overrides the default 30s `maxTimeMS` for this connection's find/aggregate calls.
+    pub fn with_query_timeout_ms(mut self, ms: u64) -> Self {
+        self.query_timeout_ms = ms;
+        self
     }
 
     async fn get_db(&self) -> Result<mongodb::Database, DbError> {
@@ -173,6 +187,7 @@ impl MongoDatabase for MongoDb {
                     .limit((max as i64) + 1)
                     .projection(projection)
                     .sort(sort)
+                    .max_time(Duration::from_millis(self.query_timeout_ms))
                     .build();
 
                 let mut cursor = db
@@ -225,9 +240,13 @@ impl MongoDatabase for MongoDb {
 
                 check_pipeline_readonly(&pipeline)?;
 
+                let agg_opts = AggregateOptions::builder()
+                    .max_time(Duration::from_millis(self.query_timeout_ms))
+                    .build();
+
                 let mut cursor = db
                     .collection::<Document>(require_coll()?)
-                    .aggregate(pipeline, None)
+                    .aggregate(pipeline, agg_opts)
                     .await
                     .map_err(|e| DbError::QueryFailed(e.to_string()))?;
 

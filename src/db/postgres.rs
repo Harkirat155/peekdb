@@ -4,48 +4,54 @@ use tokio::sync::Mutex;
 use tokio_postgres::{NoTls, SimpleQueryMessage};
 use tracing::{debug, error, info, warn};
 
-// Write operations and anything that mutates session / transaction state.
-// ANALYZE is NOT here — it needs the "EXPLAIN ANALYZE is OK" special case below.
-const BLOCKED_KEYWORDS: &[&str] = &[
-    // DML writes
-    "INSERT",
-    "UPDATE",
-    "DELETE",
-    "MERGE",
-    // DDL
-    "DROP",
-    "CREATE",
-    "ALTER",
-    "TRUNCATE",
-    // Permissions
-    "GRANT",
-    "REVOKE",
-    // Procedural execution
-    "EXECUTE",
-    "EXEC",
-    "CALL",
-    "DO",
-    // File / bulk operations
-    "COPY",
-    "IMPORT",
-    // Maintenance
-    "VACUUM",
-    "CLUSTER",
-    "REINDEX",
-    "REFRESH",
-    // Transaction state manipulation — we own the transaction wrapper
-    "COMMIT",
-    "ROLLBACK",
-    "SAVEPOINT",
-    "RELEASE",
-    // Session / transaction mode changes (e.g. SET TRANSACTION READ WRITE)
-    "SET",
+// Only statements whose LEADING keyword is one of these are allowed through. This
+// replaced a keyword-blocklist (which scanned the whole statement text, including
+// inside string literals — see the git history / CHANGELOG for the false-positive bug
+// that caused). Read-only enforcement's real backstop is still the
+// `BEGIN TRANSACTION READ ONLY ... ROLLBACK` wrapping in `execute_query`: this allowlist
+// is defense-in-depth, not the sole guarantee.
+//
+// TABLE is Postgres shorthand for `SELECT * FROM`; VALUES is a literal row constructor.
+// Known, accepted gap: a leading `WITH` permits `WITH d AS (DELETE FROM t RETURNING *)
+// SELECT * FROM d` — a CTE body can write. Closing that fully needs a real SQL parser
+// (out of scope here); the read-only transaction wrapper is what actually stops it.
+const ALLOWED_LEADING_KEYWORDS: &[&str] = &["SELECT", "WITH", "EXPLAIN", "SHOW", "VALUES", "TABLE"];
+
+// Bare/legacy EXPLAIN option words (e.g. `EXPLAIN ANALYZE ...`) and FORMAT's value
+// words, skipped over when locating the statement EXPLAIN actually wraps — so
+// `EXPLAIN ANALYZE INSERT ...` is correctly seen as leading with INSERT, not EXPLAIN.
+const EXPLAIN_MODIFIER_WORDS: &[&str] = &[
+    "ANALYZE",
+    "ANALYSE",
+    "VERBOSE",
+    "COSTS",
+    "SETTINGS",
+    "BUFFERS",
+    "WAL",
+    "TIMING",
+    "SUMMARY",
+    "FORMAT",
+    "GENERIC_PLAN",
+    "TEXT",
+    "XML",
+    "JSON",
+    "YAML",
+    "TRUE",
+    "FALSE",
+    "ON",
+    "OFF",
 ];
+
+/// Applied at connect time via `SET SESSION statement_timeout`, not in the checked
+/// query path — it's a session setting, not a user statement, so it isn't itself
+/// subject to (and shouldn't be confused with) the `check_allowed` allowlist.
+const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 30_000;
 
 pub struct PostgresDb {
     name: String,
     url: String,
     no_tls: bool,
+    statement_timeout_ms: u64,
     // None = not yet connected (or connection was dropped)
     client: Mutex<Option<tokio_postgres::Client>>,
 }
@@ -57,8 +63,18 @@ impl PostgresDb {
             name: name.into(),
             url: url.into(),
             no_tls,
+            statement_timeout_ms: DEFAULT_STATEMENT_TIMEOUT_MS,
             client: Mutex::new(None),
         }
+    }
+
+    /// Overrides the default 30s server-side `statement_timeout` for this connection —
+    /// guards against a runaway/looping agent hammering a database with an expensive
+    /// query. This is a control on query duration, not on call frequency; rate limiting
+    /// (call frequency) is a separate, deliberately deferred concern (see the roadmap).
+    pub fn with_statement_timeout_ms(mut self, ms: u64) -> Self {
+        self.statement_timeout_ms = ms;
+        self
     }
 
     async fn ensure_connected(
@@ -66,6 +82,7 @@ impl PostgresDb {
         name: &str,
         url: &str,
         no_tls: bool,
+        statement_timeout_ms: u64,
     ) -> Result<(), DbError> {
         if guard.is_some() {
             return Ok(());
@@ -92,29 +109,53 @@ impl PostgresDb {
                 DbError::ConnectionFailed(format!("'{}': failed to set READ ONLY: {}", name, e))
             })?;
 
-        info!("'{}' connected (READ ONLY).", name);
+        client
+            .simple_query(&format!(
+                "SET SESSION statement_timeout = {statement_timeout_ms}"
+            ))
+            .await
+            .map_err(|e| {
+                DbError::ConnectionFailed(format!(
+                    "'{}': failed to set statement_timeout: {}",
+                    name, e
+                ))
+            })?;
+
+        info!(
+            "'{}' connected (READ ONLY, statement_timeout={}ms).",
+            name, statement_timeout_ms
+        );
         **guard = Some(client);
         Ok(())
     }
 
-    fn check_blocked(sql: &str) -> Result<(), DbError> {
-        let upper = sql.to_uppercase();
-        let is_explain = upper.split_whitespace().next() == Some("EXPLAIN");
+    fn check_allowed(sql: &str) -> Result<(), DbError> {
+        let trimmed = sql.trim_start();
 
-        for &kw in BLOCKED_KEYWORDS {
-            if keyword_found(&upper, kw) {
-                return Err(DbError::BlockedKeyword {
-                    keyword: kw.to_string(),
-                });
-            }
+        let body = if leading_word(trimmed).eq_ignore_ascii_case("EXPLAIN") {
+            strip_leading_explain(trimmed)
+        } else {
+            trimmed
+        };
+
+        // Permit a parenthesized top-level query, e.g. "(SELECT 1) UNION (SELECT 2)".
+        let mut body = body.trim_start();
+        while let Some(stripped) = body.strip_prefix('(') {
+            body = stripped.trim_start();
         }
-        // ANALYZE standalone is blocked; EXPLAIN ANALYZE is fine
-        if !is_explain && keyword_found(&upper, "ANALYZE") {
-            return Err(DbError::BlockedKeyword {
-                keyword: "ANALYZE".to_string(),
-            });
+
+        let leading = leading_word(body);
+        if !leading.is_empty()
+            && ALLOWED_LEADING_KEYWORDS
+                .iter()
+                .any(|k| leading.eq_ignore_ascii_case(k))
+        {
+            Ok(())
+        } else {
+            Err(DbError::NotAllowedStatement {
+                leading: leading.to_uppercase(),
+            })
         }
-        Ok(())
     }
 }
 
@@ -154,24 +195,48 @@ async fn connect_tls(url: &str) -> Result<tokio_postgres::Client, DbError> {
     Ok(client)
 }
 
-fn keyword_found(haystack: &str, keyword: &str) -> bool {
-    let mut start = 0;
-    while let Some(pos) = haystack[start..].find(keyword) {
-        let abs = start + pos;
-        let before_ok = abs == 0 || !is_ident_char(haystack.as_bytes()[abs - 1]);
-        let after_pos = abs + keyword.len();
-        let after_ok =
-            after_pos >= haystack.len() || !is_ident_char(haystack.as_bytes()[after_pos]);
-        if before_ok && after_ok {
-            return true;
-        }
-        start = abs + 1;
-    }
-    false
+/// The leading run of identifier-like characters in `s` (char-boundary safe — this
+/// slices `s` at `char_indices()` offsets, never raw byte offsets computed from a
+/// separately-cased copy, which is what caused a real panic elsewhere in this codebase
+/// for non-ASCII text; see `cli::truncate`).
+fn leading_word(s: &str) -> &str {
+    let end = s
+        .char_indices()
+        .find(|&(_, c)| !(c.is_ascii_alphanumeric() || c == '_'))
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    &s[..end]
 }
 
-fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+/// Given a string starting with "EXPLAIN" (case-insensitive), returns the slice
+/// starting at whatever statement EXPLAIN wraps — after skipping its parenthesized
+/// option list, e.g. `(ANALYZE, BUFFERS)`, or a legacy sequence of bare option words
+/// like `ANALYZE VERBOSE` / `FORMAT JSON`.
+fn strip_leading_explain(sql: &str) -> &str {
+    let first = leading_word(sql);
+    let mut rest = &sql[first.len()..];
+
+    let after_ws = rest.trim_start();
+    if let Some(after_paren) = after_ws.strip_prefix('(') {
+        return match after_paren.find(')') {
+            Some(idx) => &after_paren[idx + 1..],
+            None => after_ws, // unterminated '(' — leave as-is, the allowlist check below rejects it
+        };
+    }
+
+    loop {
+        let t = rest.trim_start();
+        let t = t.strip_prefix(',').map(|s| s.trim_start()).unwrap_or(t);
+        let word = leading_word(t);
+        if word.is_empty()
+            || !EXPLAIN_MODIFIER_WORDS
+                .iter()
+                .any(|m| word.eq_ignore_ascii_case(m))
+        {
+            return t;
+        }
+        rest = &t[word.len()..];
+    }
 }
 
 #[async_trait]
@@ -187,12 +252,19 @@ impl Database for PostgresDb {
             return Err(DbError::MultipleStatements);
         }
 
-        Self::check_blocked(sql)?;
+        Self::check_allowed(sql)?;
 
         debug!("[{}] {}", self.name, sql);
 
         let mut guard = self.client.lock().await;
-        Self::ensure_connected(&mut guard, &self.name, &self.url, self.no_tls).await?;
+        Self::ensure_connected(
+            &mut guard,
+            &self.name,
+            &self.url,
+            self.no_tls,
+            self.statement_timeout_ms,
+        )
+        .await?;
 
         // Every user statement runs inside an explicit read-only transaction that is
         // always rolled back. This is the primary enforcement layer:
@@ -281,7 +353,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_blocked_keyword_is_rejected() {
+    fn every_disallowed_leading_statement_is_rejected() {
         let samples: &[(&str, &str)] = &[
             ("INSERT", "INSERT INTO t VALUES (1)"),
             ("UPDATE", "UPDATE t SET x = 1"),
@@ -308,63 +380,85 @@ mod tests {
             ("SAVEPOINT", "SAVEPOINT s"),
             ("RELEASE", "RELEASE s"),
             ("SET", "SET search_path = public"),
+            ("ANALYZE", "ANALYZE t"),
         ];
-        for (kw, sql) in samples {
-            match PostgresDb::check_blocked(sql) {
-                Err(DbError::BlockedKeyword { keyword }) => assert_eq!(&keyword, kw),
-                other => panic!("expected {kw} to be blocked for {sql:?}, got {other:?}"),
+        for (leading, sql) in samples {
+            match PostgresDb::check_allowed(sql) {
+                Err(DbError::NotAllowedStatement { leading: found }) => {
+                    assert_eq!(&found, leading)
+                }
+                other => panic!("expected {sql:?} to be rejected, got {other:?}"),
             }
         }
     }
 
     #[test]
-    fn standalone_analyze_is_blocked() {
-        assert!(matches!(
-            PostgresDb::check_blocked("ANALYZE t"),
-            Err(DbError::BlockedKeyword { .. })
-        ));
-    }
-
-    #[test]
-    fn explain_analyze_is_allowed_through_the_blocklist() {
-        assert!(PostgresDb::check_blocked("EXPLAIN ANALYZE SELECT 1").is_ok());
-        assert!(PostgresDb::check_blocked("EXPLAIN SELECT 1").is_ok());
-    }
-
-    #[test]
-    fn plain_select_is_allowed() {
-        assert!(PostgresDb::check_blocked("SELECT * FROM t WHERE id = 1").is_ok());
-    }
-
-    #[test]
-    fn identifiers_containing_keyword_substrings_are_not_false_positives() {
-        // Word-boundary matching must not trip on column/identifier names that merely
-        // contain a blocked keyword as a substring.
+    fn every_allowed_leading_statement_is_permitted() {
         for sql in [
-            "SELECT created_at FROM t",
-            "SELECT copy_of_x FROM t",
-            "SELECT * FROM t WHERE do_not_use = 1",
-            "SELECT set_id FROM t",
-            "SELECT * FROM t WHERE call_count > 0",
+            "SELECT * FROM t WHERE id = 1",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "SHOW search_path",
+            "VALUES (1), (2)",
+            "TABLE widgets",
+            "(SELECT 1) UNION (SELECT 2)",
         ] {
             assert!(
-                PostgresDb::check_blocked(sql).is_ok(),
-                "{sql:?} should not be blocked"
+                PostgresDb::check_allowed(sql).is_ok(),
+                "{sql:?} should be allowed"
             );
         }
     }
 
     #[test]
-    fn known_false_positive_string_literal_containing_a_keyword_is_blocked() {
-        // Characterization test, not a desired behavior: check_blocked scans the whole
-        // uppercased statement text, including inside string literals, so a literal
-        // value that happens to contain a blocked keyword as a whole word is wrongly
-        // rejected. This is a known, accepted gap fixed by the Phase 2 allowlist
-        // rewrite (which only inspects the leading statement keyword) — documented
-        // here so the fix is a visible behavior change, not a silent one.
-        assert!(matches!(
-            PostgresDb::check_blocked("SELECT 'DROP TABLE users' AS example"),
-            Err(DbError::BlockedKeyword { .. })
-        ));
+    fn explain_variants_wrapping_an_allowed_statement_are_permitted() {
+        for sql in [
+            "EXPLAIN SELECT 1",
+            "EXPLAIN ANALYZE SELECT 1",
+            "EXPLAIN ANALYZE VERBOSE SELECT 1",
+            "EXPLAIN (ANALYZE, BUFFERS) SELECT 1",
+            "EXPLAIN FORMAT JSON SELECT 1",
+            "explain select 1", // case-insensitive
+        ] {
+            assert!(
+                PostgresDb::check_allowed(sql).is_ok(),
+                "{sql:?} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn explain_wrapping_a_write_statement_is_still_rejected() {
+        // The exact smuggling case an allowlist must not miss: EXPLAIN's own leading
+        // keyword is allowed, but the statement it wraps must be checked too.
+        for sql in [
+            "EXPLAIN INSERT INTO widgets (name) VALUES ('x')",
+            "EXPLAIN ANALYZE INSERT INTO widgets (name) VALUES ('x')",
+            "EXPLAIN (ANALYZE) DELETE FROM widgets",
+        ] {
+            assert!(
+                matches!(
+                    PostgresDb::check_allowed(sql),
+                    Err(DbError::NotAllowedStatement { .. })
+                ),
+                "{sql:?} should still be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn string_literal_containing_a_keyword_is_no_longer_a_false_positive() {
+        // This used to be wrongly rejected by the old blocklist (it scanned the whole
+        // uppercased text, including inside string literals). The allowlist only
+        // inspects the leading token, so this now correctly passes — a real bug fix,
+        // not just a behavior change.
+        assert!(PostgresDb::check_allowed("SELECT 'DROP TABLE users' AS example").is_ok());
+    }
+
+    #[test]
+    fn unrecognized_leading_statement_is_rejected() {
+        match PostgresDb::check_allowed("PRAGMA foo") {
+            Err(DbError::NotAllowedStatement { leading }) => assert_eq!(leading, "PRAGMA"),
+            other => panic!("expected rejection, got {other:?}"),
+        }
     }
 }

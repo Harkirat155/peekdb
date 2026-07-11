@@ -1,17 +1,19 @@
+pub mod audit;
 pub mod cli;
 pub mod config;
 pub mod db;
 pub mod server;
 
+use audit::{AuditLog, AuditedDatabase, AuditedMongo};
 use clap::{Parser, Subcommand};
-use config::{interpolate_env, Config, DatabaseConfig};
+use config::{interpolate_env, Config, DatabaseConfig, MongoConfig};
 use db::mongo::MongoDb;
 use db::postgres::PostgresDb;
 use db::traits::{Database, MongoDatabase, MongoOperation, MongoQuery};
 use mongodb::options::ClientOptions;
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
@@ -62,6 +64,15 @@ struct ServeArgs {
     /// Default maximum rows returned per query
     #[arg(long, default_value = "500", env = "MCP_MAX_ROWS")]
     max_rows: usize,
+
+    /// Path to the audit log (JSON Lines). Defaults to <config-dir>/audit.jsonl when
+    /// --config is used; no default when using --database-url instead.
+    #[arg(long, env = "MCP_AUDIT_LOG")]
+    audit_log: Option<PathBuf>,
+
+    /// Disable audit logging entirely for this run.
+    #[arg(long, default_value_t = false)]
+    no_audit_log: bool,
 }
 
 // ── Query sub-command (Postgres CLI) ─────────────────────────────────────────
@@ -87,6 +98,14 @@ struct QueryArgs {
     /// Output rows as a JSON array instead of a table
     #[arg(long)]
     json: bool,
+
+    /// Path to the audit log (JSON Lines). Defaults to <config-dir>/audit.jsonl.
+    #[arg(long, env = "MCP_AUDIT_LOG")]
+    audit_log: Option<PathBuf>,
+
+    /// Disable audit logging entirely for this run.
+    #[arg(long, default_value_t = false)]
+    no_audit_log: bool,
 }
 
 // ── Mongo sub-command ─────────────────────────────────────────────────────────
@@ -136,6 +155,14 @@ struct MongoArgs {
     /// Output as a JSON array instead of pretty-printed documents
     #[arg(long)]
     json: bool,
+
+    /// Path to the audit log (JSON Lines). Defaults to <config-dir>/audit.jsonl.
+    #[arg(long, env = "MCP_AUDIT_LOG")]
+    audit_log: Option<PathBuf>,
+
+    /// Disable audit logging entirely for this run.
+    #[arg(long, default_value_t = false)]
+    no_audit_log: bool,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -225,20 +252,70 @@ mod inject_serve_default_tests {
 
 // ── Shared database setup helpers ─────────────────────────────────────────────
 
-async fn build_pg_databases(path: &Path) -> HashMap<String, Arc<dyn Database>> {
+/// Where should the audit log live for this invocation? `--no-audit-log` wins outright;
+/// otherwise an explicit `--audit-log`/`MCP_AUDIT_LOG` wins; otherwise default to
+/// `<config-dir>/audit.jsonl` when a config file path is available (there's no sane
+/// default directory for the ad-hoc `--database-url` shorthand, so that case stays
+/// unaudited unless the user passes `--audit-log` explicitly).
+fn resolve_audit_log_path(
+    config_path: Option<&Path>,
+    audit_log_flag: &Option<PathBuf>,
+    no_audit_log: bool,
+) -> Option<PathBuf> {
+    if no_audit_log {
+        return None;
+    }
+    if let Some(p) = audit_log_flag {
+        return Some(p.clone());
+    }
+    config_path.map(|p| p.parent().unwrap_or(Path::new(".")).join("audit.jsonl"))
+}
+
+fn new_postgres_db(cfg: &DatabaseConfig, url: String) -> PostgresDb {
+    let db = PostgresDb::new(&cfg.name, url, cfg.no_tls);
+    match cfg.statement_timeout_ms {
+        Some(ms) => db.with_statement_timeout_ms(ms),
+        None => db,
+    }
+}
+
+fn new_mongo_db(cfg: &MongoConfig, uri: String, dbname: String) -> MongoDb {
+    let db = MongoDb::new(&cfg.name, uri, dbname);
+    match cfg.query_timeout_ms {
+        Some(ms) => db.with_query_timeout_ms(ms),
+        None => db,
+    }
+}
+
+async fn build_pg_databases(
+    path: &Path,
+    source: &'static str,
+    audit: &Option<Arc<AuditLog>>,
+) -> HashMap<String, Arc<dyn Database>> {
     let config = load_config(path);
     let mut databases: HashMap<String, Arc<dyn Database>> = HashMap::new();
     for cfg in config.database {
         let url = resolve_url(&cfg.name, &cfg.url);
-        databases.insert(
-            cfg.name.clone(),
-            Arc::new(PostgresDb::new(&cfg.name, url, cfg.no_tls)),
-        );
+        let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url));
+        let db = match audit {
+            Some(log) => Arc::new(AuditedDatabase::new(
+                db,
+                cfg.name.clone(),
+                source,
+                log.clone(),
+            )) as Arc<dyn Database>,
+            None => db,
+        };
+        databases.insert(cfg.name.clone(), db);
     }
     databases
 }
 
-async fn build_mongo_databases(path: &Path) -> HashMap<String, Arc<dyn MongoDatabase>> {
+async fn build_mongo_databases(
+    path: &Path,
+    source: &'static str,
+    audit: &Option<Arc<AuditLog>>,
+) -> HashMap<String, Arc<dyn MongoDatabase>> {
     let config = load_config(path);
     let mut dbs: HashMap<String, Arc<dyn MongoDatabase>> = HashMap::new();
     for cfg in config.mongo {
@@ -254,10 +331,13 @@ async fn build_mongo_databases(path: &Path) -> HashMap<String, Arc<dyn MongoData
             );
             std::process::exit(1);
         });
-        dbs.insert(
-            cfg.name.clone(),
-            Arc::new(MongoDb::new(&cfg.name, uri, dbname)),
-        );
+        let db: Arc<dyn MongoDatabase> = Arc::new(new_mongo_db(&cfg, uri, dbname));
+        let db = match audit {
+            Some(log) => Arc::new(AuditedMongo::new(db, cfg.name.clone(), source, log.clone()))
+                as Arc<dyn MongoDatabase>,
+            None => db,
+        };
+        dbs.insert(cfg.name.clone(), db);
     }
     dbs
 }
@@ -423,6 +503,8 @@ async fn run_serve(args: ServeArgs) {
                 name: args.database_name.clone(),
                 url: url.clone(),
                 no_tls: args.no_tls,
+                allow_literal_password: true,
+                statement_timeout_ms: None,
             }],
             vec![],
         ),
@@ -436,13 +518,24 @@ async fn run_serve(args: ServeArgs) {
         }
     };
 
+    let audit_path =
+        resolve_audit_log_path(args.config.as_deref(), &args.audit_log, args.no_audit_log);
+    let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
+
     let mut databases: HashMap<String, Arc<dyn Database>> = HashMap::new();
     for cfg in pg_configs {
         let url = resolve_url(&cfg.name, &cfg.url);
-        databases.insert(
-            cfg.name.clone(),
-            Arc::new(PostgresDb::new(&cfg.name, url, cfg.no_tls)),
-        );
+        let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url));
+        let db = match &audit {
+            Some(log) => Arc::new(AuditedDatabase::new(
+                db,
+                cfg.name.clone(),
+                "mcp",
+                log.clone(),
+            )) as Arc<dyn Database>,
+            None => db,
+        };
+        databases.insert(cfg.name.clone(), db);
     }
 
     let mut mongo_databases: HashMap<String, Arc<dyn MongoDatabase>> = HashMap::new();
@@ -456,10 +549,13 @@ async fn run_serve(args: ServeArgs) {
             eprintln!("Fatal: mongo '{}' URI must include database name", cfg.name);
             std::process::exit(1);
         });
-        mongo_databases.insert(
-            cfg.name.clone(),
-            Arc::new(MongoDb::new(&cfg.name, uri, dbname)),
-        );
+        let db: Arc<dyn MongoDatabase> = Arc::new(new_mongo_db(&cfg, uri, dbname));
+        let db = match &audit {
+            Some(log) => Arc::new(AuditedMongo::new(db, cfg.name.clone(), "mcp", log.clone()))
+                as Arc<dyn MongoDatabase>,
+            None => db,
+        };
+        mongo_databases.insert(cfg.name.clone(), db);
     }
 
     server::run(databases, mongo_databases, args.max_rows).await;
@@ -486,7 +582,10 @@ async fn run_query(args: QueryArgs) {
         std::process::exit(1);
     }
 
-    let databases = build_pg_databases(&args.config).await;
+    let audit_path = resolve_audit_log_path(Some(&args.config), &args.audit_log, args.no_audit_log);
+    let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
+
+    let databases = build_pg_databases(&args.config, "cli", &audit).await;
     let db = pick_pg(&databases, &args.db).unwrap_or_else(|e| {
         eprintln!("{}", e);
         std::process::exit(1);
@@ -518,7 +617,10 @@ async fn run_mongo(args: MongoArgs) {
         field: args.field,
     };
 
-    let databases = build_mongo_databases(&args.config).await;
+    let audit_path = resolve_audit_log_path(Some(&args.config), &args.audit_log, args.no_audit_log);
+    let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
+
+    let databases = build_mongo_databases(&args.config, "cli", &audit).await;
     let db = pick_mongo(&databases, &args.db).unwrap_or_else(|e| {
         eprintln!("{}", e);
         std::process::exit(1);

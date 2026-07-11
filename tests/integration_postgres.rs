@@ -193,8 +193,8 @@ async fn disallowed_statements_are_rejected_end_to_end_and_table_is_untouched() 
     for sql in statements {
         let result = d.execute_query(sql, 500).await;
         assert!(
-            matches!(result, Err(DbError::BlockedKeyword { .. })),
-            "{sql:?} should be blocked, got {result:?}"
+            matches!(result, Err(DbError::NotAllowedStatement { .. })),
+            "{sql:?} should be rejected, got {result:?}"
         );
     }
 
@@ -215,6 +215,61 @@ async fn interior_semicolon_statement_chaining_is_rejected() {
         .execute_query("SELECT 1; INSERT INTO widgets (name) VALUES ('x')", 500)
         .await;
     assert!(matches!(result, Err(DbError::MultipleStatements)));
+}
+
+#[tokio::test]
+#[ignore]
+async fn string_literal_containing_a_keyword_now_succeeds_end_to_end() {
+    // Regression test for the fixed false positive: the old blocklist scanned the
+    // whole statement text (including string literals) and wrongly rejected this.
+    setup_widgets().await;
+    let d = db();
+    let result = d
+        .execute_query("SELECT 'DROP TABLE users' AS example", 500)
+        .await
+        .unwrap();
+    assert_eq!(result.rows[0][0], Some("DROP TABLE users".to_string()));
+}
+
+#[tokio::test]
+#[ignore]
+async fn explain_analyze_wrapping_a_write_is_still_rejected_end_to_end() {
+    // The allowlist must not be fooled by EXPLAIN's own leading keyword — the
+    // statement EXPLAIN wraps has to be checked too.
+    setup_widgets().await;
+    let d = db();
+    let result = d
+        .execute_query(
+            "EXPLAIN ANALYZE INSERT INTO widgets (name) VALUES ('smuggled')",
+            500,
+        )
+        .await;
+    assert!(matches!(result, Err(DbError::NotAllowedStatement { .. })));
+
+    let check = d
+        .execute_query("SELECT count(*) AS c FROM widgets", 500)
+        .await
+        .unwrap();
+    assert_eq!(check.rows[0][0], Some("3".to_string()));
+}
+
+#[tokio::test]
+#[ignore]
+async fn statement_timeout_actually_aborts_a_slow_query() {
+    // Proves the connect-time `SET SESSION statement_timeout` really takes effect —
+    // not just that the config plumbing compiles. pg_sleep(2) with a 200ms timeout
+    // must fail, not hang for 2 seconds.
+    let d = PostgresDb::new("test", PG_URL, true).with_statement_timeout_ms(200);
+    let start = std::time::Instant::now();
+    let result = d.execute_query("SELECT pg_sleep(2)", 500).await;
+    assert!(
+        result.is_err(),
+        "expected the slow query to be aborted by statement_timeout"
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(1),
+        "query should have been aborted well before the full 2s sleep completed"
+    );
 }
 
 #[tokio::test]

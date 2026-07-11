@@ -14,12 +14,20 @@ pub struct QueryResult {
 
 #[derive(Debug, Error)]
 pub enum DbError {
+    /// Mongo's operation allowlist and (future) Redis's command allowlist reject via
+    /// this variant. Postgres used to as well, before its blocklist became an allowlist
+    /// (see `NotAllowedStatement`) — kept for those other backends' use.
     #[error("Blocked: statement contains disallowed keyword '{keyword}'")]
     BlockedKeyword { keyword: String },
     #[error(
         "Blocked: only one SQL statement per call is allowed (found ';' inside the statement)"
     )]
     MultipleStatements,
+    #[error(
+        "Not allowed: statement must start with SELECT, WITH, EXPLAIN, SHOW, VALUES, or TABLE \
+         (found '{leading}')"
+    )]
+    NotAllowedStatement { leading: String },
     #[error("Query failed: {0}")]
     QueryFailed(String),
     #[error("Connection failed: {0}")]

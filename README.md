@@ -11,7 +11,7 @@ When you let an AI assistant query a database, you want a hard guarantee that it
 **PostgreSQL:**
 1. **Transaction-level** — every query runs inside `BEGIN TRANSACTION READ ONLY … ROLLBACK`. PostgreSQL blocks `SET TRANSACTION READ WRITE` escalation inside a read-only transaction.
 2. **Session-level** — the connection opens with `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` as a second layer.
-3. **Keyword blocklist** — common write operations and transaction-state keywords are rejected before the query reaches the database.
+3. **Statement allowlist** — a query is only sent to the database if it *starts with* `SELECT`, `WITH`, `EXPLAIN`, `SHOW`, `VALUES`, or `TABLE`; everything else (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `CREATE`, `ALTER`, `GRANT`, `COPY`, `SET`, …) is rejected before it reaches the database. `EXPLAIN`'s own leading keyword doesn't exempt the statement it wraps — `EXPLAIN ANALYZE INSERT …` is still rejected.
 4. **Single-statement enforcement** — interior `;` chains are rejected, preventing `SET …; INSERT …` patterns.
 
 **MongoDB:**
@@ -233,11 +233,11 @@ Documents are serialized as MongoDB Extended JSON (`{"$oid": "..."}` for ObjectI
 
 | Threat | PostgreSQL mitigation | MongoDB mitigation |
 |--------|----------------------|-------------------|
-| Prompt injection write attempt | Keyword blocklist rejects before DB; `BEGIN TRANSACTION READ ONLY` rejects at DB | Operation whitelist: only read operations accepted |
-| `SET TRANSACTION READ WRITE` escalation | Blocked by `SET` keyword; PostgreSQL also blocks it inside a read-only transaction | N/A |
+| Prompt injection write attempt | Leading-statement allowlist rejects before DB; `BEGIN TRANSACTION READ ONLY` rejects at DB regardless | Operation whitelist: only read operations accepted |
+| `SET TRANSACTION READ WRITE` escalation | `SET` isn't an allowed leading statement; PostgreSQL also blocks it inside a read-only transaction | N/A |
 | Aggregation pipeline writing to a collection | N/A | `$out` and `$merge` stages are detected and blocked before execution |
 | Statement chaining (`SET …; INSERT …`) | Single-statement enforcement: interior `;` is rejected | N/A |
-| Credential exposure | `${ENV_VAR}` interpolation; `databases.toml` is gitignored | Same |
+| Credential exposure | `${ENV_VAR}` interpolation; literal passwords in `databases.toml` are rejected at load time; the file itself is gitignored | Same |
 | Excessive data exposure | Row limit (default 500, max 5000) | Document limit (default 100, max 1000) |
 
 ## Extending to other databases

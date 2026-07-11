@@ -300,11 +300,12 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
             "description": format!(
                 "Execute a read-only SQL query against a PostgreSQL database.\n\
                  Databases: {db_list}\n\n\
-                 Allowed: SELECT, EXPLAIN, EXPLAIN ANALYZE, SHOW, WITH...SELECT.\n\
-                 Blocked: INSERT, UPDATE, DELETE, MERGE, DROP, CREATE, ALTER, TRUNCATE, GRANT, REVOKE, \
-                 COPY, VACUUM, ANALYZE (standalone), CALL, DO, EXEC, CLUSTER, REINDEX, REFRESH, IMPORT, \
-                 SET, COMMIT, ROLLBACK, SAVEPOINT, RELEASE.\n\n\
-                 Every query runs inside BEGIN TRANSACTION READ ONLY ... ROLLBACK. \
+                 The statement must START WITH one of: SELECT, WITH, EXPLAIN, SHOW, VALUES, TABLE \
+                 (everything else — INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, GRANT, COPY, \
+                 VACUUM, SET, etc. — is rejected). EXPLAIN's own leading keyword doesn't exempt \
+                 the statement it wraps: EXPLAIN ANALYZE INSERT ... is still rejected.\n\n\
+                 Every query also runs inside BEGIN TRANSACTION READ ONLY ... ROLLBACK — Postgres \
+                 itself enforces read-only regardless of the statement allowlist above. \
                  Only one statement per call is allowed."
             ),
             "inputSchema": {
