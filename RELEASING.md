@@ -11,6 +11,8 @@ happens by accident or by a CI job with too much authority.
       should return nothing).
 - [ ] No real credentials anywhere in the tagged commit's history (`databases.toml` was
       never committed — confirm with `git log --all -- databases.toml`).
+- [ ] `cargo package --list` contains no gitignored config/secret files — only
+      `databases.toml.example`/`.env.example` should appear, never `databases.toml` itself.
 - [ ] Config validation (rejecting literal passwords), audit logging, and all three
       backends' allowlists are present and covered by tests — they are as of the current
       `main`, but re-confirm if this checklist is run against an older commit.
