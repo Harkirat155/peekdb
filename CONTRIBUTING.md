@@ -6,7 +6,7 @@
 2. Docker, for the integration test containers.
 3. Clone and build:
    ```bash
-   git clone https://github.com/Harkirat155/mcp-db-readonly peekdb
+   git clone https://github.com/Harkirat155/peekdb
    cd peekdb
    cargo build
    ```

@@ -6,7 +6,7 @@ labels: bug
 ---
 
 **Note:** if this is a security issue (an enforcement bypass, or a credential leaking into
-logs/output), please use [private vulnerability reporting](https://github.com/Harkirat155/mcp-db-readonly/security/advisories/new)
+logs/output), please use [private vulnerability reporting](https://github.com/Harkirat155/peekdb/security/advisories/new)
 instead of a public issue — see [SECURITY.md](../../SECURITY.md).
 
 ## What happened

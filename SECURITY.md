@@ -10,7 +10,7 @@ read-only — is a security issue, not an ordinary bug.
 
 **Please do not open a public GitHub issue for a security report.**
 
-Use [GitHub's private vulnerability reporting](https://github.com/Harkirat155/mcp-db-readonly/security/advisories/new)
+Use [GitHub's private vulnerability reporting](https://github.com/Harkirat155/peekdb/security/advisories/new)
 for this repository (Security tab → "Report a vulnerability"). This opens a private
 conversation with the maintainer and lets a fix be prepared before public disclosure.
 

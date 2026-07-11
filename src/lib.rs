@@ -206,7 +206,7 @@ struct RedisArgs {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Runs the full CLI: tracing init, arg parsing (with the legacy-serve-default shim),
-/// and dispatch. Called by `src/main.rs` and by the `mcp-db-readonly` compat-alias binary.
+/// and dispatch. Called by `src/main.rs`.
 pub async fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(

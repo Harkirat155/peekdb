@@ -33,6 +33,12 @@ jobs:
             os: macos-13
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          # Native arm64 Windows hosted runner (public preview). If unavailable for this
+          # repo's plan, this job fails independently (fail-fast: false) — drop the entry.
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +57,8 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package tarball
+      - name: Package tarball (Linux/macOS)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -59,17 +66,39 @@ jobs:
           out="peekdb-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$out"
           cp "$bin_dir/peekdb" "$out/"
-          cp "$bin_dir/mcp-db-readonly" "$out/"
           cp README.md LICENSE CHANGELOG.md databases.toml.example "$out/"
           tar -czf "$out.tar.gz" "$out"
           shasum -a 256 "$out.tar.gz" > "$out.tar.gz.sha256"
 
+      - name: Package zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin_dir = "target/${{ matrix.target }}/release"
+          $out = "peekdb-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $out | Out-Null
+          Copy-Item "$bin_dir/peekdb.exe" $out
+          Copy-Item README.md,LICENSE,CHANGELOG.md,databases.toml.example $out
+          Compress-Archive -Path $out -DestinationPath "$out.zip"
+          $hash = (Get-FileHash "$out.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $out.zip" | Out-File -Encoding ascii "$out.zip.sha256"
+
       - uses: actions/upload-artifact@v4
+        if: runner.os != 'Windows'
         with:
           name: peekdb-${{ matrix.target }}
           path: |
             peekdb-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
             peekdb-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: peekdb-${{ matrix.target }}
+          path: |
+            peekdb-${{ github.ref_name }}-${{ matrix.target }}.zip
+            peekdb-${{ github.ref_name }}-${{ matrix.target }}.zip.sha256
           if-no-files-found: error
 
   release:

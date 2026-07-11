@@ -10,10 +10,6 @@ fn bin() -> Command {
     Command::cargo_bin("peekdb").unwrap()
 }
 
-fn compat_bin() -> Command {
-    Command::cargo_bin("mcp-db-readonly").unwrap()
-}
-
 #[test]
 fn help_flag_succeeds() {
     bin()
@@ -29,17 +25,6 @@ fn help_flag_succeeds() {
 #[test]
 fn version_flag_succeeds() {
     bin().arg("--version").assert().success();
-}
-
-#[test]
-fn deprecated_compat_binary_still_runs_and_warns() {
-    // Existing MCP client configs pointing at the old `mcp-db-readonly` binary name must
-    // keep working unmodified after a rebuild under the new `peekdb` package name.
-    compat_bin()
-        .arg("--version")
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("deprecated"));
 }
 
 #[test]

@@ -29,10 +29,15 @@ or failed — is recorded in an append-only audit log.
 
 ## Installation
 
+### Prebuilt binaries
+
+Download a tarball/zip for your platform from [GitHub Releases](https://github.com/Harkirat155/peekdb/releases)
+— Linux, macOS, and Windows, x86_64 and aarch64.
+
 ### From source
 
 ```bash
-git clone https://github.com/Harkirat155/mcp-db-readonly peekdb
+git clone https://github.com/Harkirat155/peekdb
 cd peekdb
 cargo build --release
 # Binary: target/release/peekdb
@@ -251,10 +256,6 @@ Add to `~/.claude/mcp.json` (or the Claude Desktop / Cursor equivalent):
 
 Once configured, the AI has access to the `sql_query`, `mongo_query`, and `redis_query`
 tools and can explore schema and data across all configured databases.
-
-> Existing configs pointing at the old `mcp-db-readonly` binary name keep working unmodified
-> — a deprecated compat binary of that name ships alongside `peekdb` and will be removed at
-> 1.0.
 
 ### `sql_query` (PostgreSQL)
 
