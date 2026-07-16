@@ -1,7 +1,9 @@
+use crate::cache::{CachedPayload, PageCursor, ResultCache, SchemaCache};
 use crate::db::schema::{
     describe_mongo_collection, describe_pg_table, describe_redis_key, list_mongo_collections,
-    list_pg_tables, mongo_result_json, query_result_json, redis_result_json,
-    sample_mongo_collection, sample_pg_table, scan_redis_keys,
+    list_pg_tables, mongo_result_json, mongo_result_json_with_page, query_result_json,
+    query_result_json_with_page, redis_result_json, redis_result_json_with_page,
+    sample_mongo_collection, sample_pg_table, scan_redis_keys, PageMeta,
 };
 use crate::db::traits::{
     Database, MongoDatabase, MongoOperation, MongoQuery, MongoResult, QueryResult, RedisDatabase,
@@ -76,6 +78,8 @@ pub struct Server {
     redis_databases: HashMap<String, Arc<dyn RedisDatabase>>,
     redis_names: Vec<String>,
     default_max_rows: usize,
+    schema_cache: SchemaCache,
+    result_cache: ResultCache,
 }
 
 impl Server {
@@ -99,6 +103,8 @@ impl Server {
             redis_databases,
             redis_names,
             default_max_rows,
+            schema_cache: SchemaCache::from_env(),
+            result_cache: ResultCache::from_env(),
         }
     }
 
@@ -392,6 +398,11 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
                         "description": "Max objects to return (default 100, max 200 for Redis SCAN).",
                         "minimum": 1,
                         "maximum": 2000
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Skip this many objects (Postgres/Mongo list only; for paging a long catalog).",
+                        "minimum": 0
                     }
                 },
                 "required": if all_targets.len() > 1 { json!(["database"]) } else { json!([]) }
@@ -399,7 +410,7 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
         }));
         tools.push(json!({
             "name": "describe_object",
-            "description": "Describe a table/view (Postgres), collection (Mongo, sample-inferred fields + indexes), or key (Redis TYPE/TTL).",
+            "description": "Describe a table/view (Postgres), collection (Mongo, sample-inferred fields + indexes), or key (Redis TYPE/TTL). Results are TTL-cached per process.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -449,13 +460,23 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
         let mut props = json!({
             "statement": {
                 "type": "string",
-                "description": "Read-only SQL (SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE only)"
+                "description": "Read-only SQL (SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE only). Omit when using cursor."
             },
             "max_rows": {
                 "type": "integer",
-                "description": "Maximum rows to return (1–5000). Defaults to server max_rows setting.",
+                "description": "Max rows to fetch from the DB into the buffer (1–5000). Defaults to server max_rows.",
                 "minimum": 1,
                 "maximum": 5000
+            },
+            "page_size": {
+                "type": "integer",
+                "description": "Rows per MCP response page (default: all buffered rows). When set smaller than the buffer, meta.next_cursor pages without re-querying.",
+                "minimum": 1,
+                "maximum": 5000
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque cursor from a previous meta.next_cursor — continues the same result buffer (no re-execute)."
             },
             "format": {
                 "type": "string",
@@ -477,17 +498,19 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
                 "default": server.db_names[0]
             });
         }
+        // statement required only when not paging; schema keeps it optional so cursor-only works
         let required = if multi_pg {
-            json!(["statement", "database"])
+            json!(["database"])
         } else {
-            json!(["statement"])
+            json!([])
         };
         let db_list = server.db_names.join(", ");
         tools.push(json!({
             "name": "sql_query",
             "description": format!(
                 "Read-only SQL against Postgres ({db_list}). Prefer list_objects/describe_object first. \
-                 Allowlist: SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE; plus READ ONLY transaction. Single statement only."
+                 Allowlist: SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE; plus READ ONLY transaction. Single statement only. \
+                 Use page_size + cursor to page a large buffer without re-running SQL."
             ),
             "inputSchema": {
                 "type": "object",
@@ -532,9 +555,19 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
             },
             "limit": {
                 "type": "integer",
-                "description": "Max documents to return (default 100, max 1000)",
+                "description": "Max documents to fetch into the buffer (default 100, max 1000)",
                 "minimum": 1,
                 "maximum": 1000
+            },
+            "page_size": {
+                "type": "integer",
+                "description": "Documents per MCP page (default: all buffered). Use with cursor to page without re-querying.",
+                "minimum": 1,
+                "maximum": 1000
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque cursor from meta.next_cursor — continues the same buffer."
             },
             "format": {
                 "type": "string",
@@ -591,9 +624,19 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
             },
             "limit": {
                 "type": "integer",
-                "description": "Max items to display for list/set/hash-like results (default 100, max 1000)",
+                "description": "Max items to fetch into the buffer for list/set/hash-like results (default 100, max 1000)",
                 "minimum": 1,
                 "maximum": 1000
+            },
+            "page_size": {
+                "type": "integer",
+                "description": "Items per MCP page (default: all buffered). Use with cursor to page without re-querying.",
+                "minimum": 1,
+                "maximum": 1000
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque cursor from meta.next_cursor — continues the same buffer."
             },
             "format": {
                 "type": "string",
@@ -615,10 +658,11 @@ fn handle_tools_list(id: Value, server: &Server) -> JsonRpcResponse {
                 "default": server.redis_names[0]
             });
         }
+        // command required unless cursor-only paging
         let required: Value = if multi_redis {
-            json!(["command", "database"])
+            json!(["database"])
         } else {
-            json!(["command"])
+            json!([])
         };
         let redis_list = server.redis_names.join(", ");
         tools.push(json!({
@@ -677,17 +721,37 @@ fn tool_err(id: Value, msg: impl std::fmt::Display) -> JsonRpcResponse {
 /// Structured error envelope for agents: stable `code` / `layer` / optional `hint`
 /// plus human `message`. Still MCP `isError: true` with a single text content block.
 fn tool_err_db(id: Value, err: &crate::db::traits::DbError) -> JsonRpcResponse {
+    tool_err_structured(id, err.code(), err.layer(), err.to_string(), err.hint())
+}
+
+/// Client/validation errors (unknown target, missing args, bad cursor) in the same shape.
+fn tool_err_client(
+    id: Value,
+    code: &str,
+    message: impl std::fmt::Display,
+    hint: Option<&str>,
+) -> JsonRpcResponse {
+    tool_err_structured(id, code, "client", message, hint)
+}
+
+fn tool_err_structured(
+    id: Value,
+    code: &str,
+    layer: &str,
+    message: impl std::fmt::Display,
+    hint: Option<&str>,
+) -> JsonRpcResponse {
     let mut body = json!({
         "error": {
-            "message": err.to_string(),
-            "code": err.code(),
-            "layer": err.layer(),
+            "message": message.to_string(),
+            "code": code,
+            "layer": layer,
         }
     });
-    if let Some(hint) = err.hint() {
-        body["error"]["hint"] = json!(hint);
+    if let Some(h) = hint {
+        body["error"]["hint"] = json!(h);
     }
-    let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| format!("Error: {err}"));
+    let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| format!("Error: {message}"));
     JsonRpcResponse::ok(
         id,
         json!({
@@ -695,6 +759,78 @@ fn tool_err_db(id: Value, err: &crate::db::traits::DbError) -> JsonRpcResponse {
             "isError": true
         }),
     )
+}
+
+fn parse_page_size(args: &Value, default: usize, max: usize) -> usize {
+    args.get("page_size")
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as usize).clamp(1, max))
+        .unwrap_or(default.clamp(1, max))
+}
+
+fn page_meta_from_slice(slice: &crate::cache::PageSlice, cached: bool) -> PageMeta {
+    PageMeta {
+        offset: Some(slice.offset),
+        total_buffered: Some(slice.total),
+        next_cursor: slice.next_cursor.clone(),
+        has_more: slice.has_more,
+        source_truncated: Some(slice.source_truncated),
+        cached,
+    }
+}
+
+fn pg_result_from_payload(payload: &CachedPayload) -> Option<QueryResult> {
+    match payload {
+        CachedPayload::Postgres {
+            columns,
+            rows,
+            source_truncated,
+            redacted,
+            ..
+        } => Some(QueryResult {
+            columns: columns.clone(),
+            rows: rows.clone(),
+            row_count: rows.len(),
+            truncated: *source_truncated,
+            command_tag: None,
+            redacted: *redacted,
+        }),
+        _ => None,
+    }
+}
+
+fn mongo_result_from_payload(payload: &CachedPayload) -> Option<MongoResult> {
+    match payload {
+        CachedPayload::Mongo {
+            documents,
+            source_truncated,
+            redacted,
+            ..
+        } => Some(MongoResult {
+            count: documents.len(),
+            documents: documents.clone(),
+            truncated: *source_truncated,
+            redacted: *redacted,
+        }),
+        _ => None,
+    }
+}
+
+fn redis_result_from_payload(payload: &CachedPayload) -> Option<RedisResult> {
+    match payload {
+        CachedPayload::Redis {
+            values,
+            source_truncated,
+            redacted,
+            ..
+        } => Some(RedisResult {
+            count: values.len(),
+            values: values.clone(),
+            truncated: *source_truncated,
+            redacted: *redacted,
+        }),
+        _ => None,
+    }
 }
 
 fn wants_table(args: &Value) -> bool {
@@ -723,56 +859,90 @@ async fn handle_list_objects(id: Value, args: Value, server: &Arc<Server>) -> Js
     let db_name = args.get("database").and_then(|v| v.as_str());
     let (name, kind) = match server.resolve_target(db_name) {
         Ok(v) => v,
-        Err(e) => return tool_err(id, e),
+        Err(e) => {
+            return tool_err_client(
+                id,
+                "unknown_target",
+                e,
+                Some("Call list_targets and pass a configured database name"),
+            )
+        }
     };
     let limit = args
         .get("limit")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize)
         .unwrap_or(100);
+    let offset = args
+        .get("offset")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0);
 
     match kind {
         BackendKind::Postgres => {
-            let db = server.databases.get(&name).unwrap().clone();
-            match list_pg_tables(db.as_ref()).await {
-                Ok(mut tables) => {
-                    let total = tables.len();
-                    if tables.len() > limit {
-                        tables.truncate(limit);
+            let (names, from_cache) = if let Some(cached) = server.schema_cache.get_list(&name) {
+                (cached, true)
+            } else {
+                let db = server.databases.get(&name).unwrap().clone();
+                match list_pg_tables(db.as_ref()).await {
+                    Ok(tables) => {
+                        server.schema_cache.put_list(&name, tables.clone());
+                        (tables, false)
                     }
-                    tool_ok(
-                        id,
-                        json!({
-                            "target": name,
-                            "backend": "postgres",
-                            "objects": tables,
-                            "meta": { "count": total.min(limit), "total_found": total, "truncated": total > limit }
-                        }),
-                    )
+                    Err(e) => return tool_err_db(id, &e),
                 }
-                Err(e) => tool_err_db(id, &e),
-            }
+            };
+            let total = names.len();
+            let page: Vec<String> = names.into_iter().skip(offset).take(limit).collect();
+            let count = page.len();
+            tool_ok(
+                id,
+                json!({
+                    "target": name,
+                    "backend": "postgres",
+                    "objects": page,
+                    "meta": {
+                        "count": count,
+                        "total_found": total,
+                        "offset": offset,
+                        "truncated": offset + count < total,
+                        "cached": from_cache
+                    }
+                }),
+            )
         }
         BackendKind::Mongo => {
-            let db = server.mongo_databases.get(&name).unwrap().clone();
-            match list_mongo_collections(db.as_ref()).await {
-                Ok(mut colls) => {
-                    let total = colls.len();
-                    if colls.len() > limit {
-                        colls.truncate(limit);
+            let (names, from_cache) = if let Some(cached) = server.schema_cache.get_list(&name) {
+                (cached, true)
+            } else {
+                let db = server.mongo_databases.get(&name).unwrap().clone();
+                match list_mongo_collections(db.as_ref()).await {
+                    Ok(colls) => {
+                        server.schema_cache.put_list(&name, colls.clone());
+                        (colls, false)
                     }
-                    tool_ok(
-                        id,
-                        json!({
-                            "target": name,
-                            "backend": "mongo",
-                            "objects": colls,
-                            "meta": { "count": total.min(limit), "total_found": total, "truncated": total > limit }
-                        }),
-                    )
+                    Err(e) => return tool_err_db(id, &e),
                 }
-                Err(e) => tool_err_db(id, &e),
-            }
+            };
+            let total = names.len();
+            let page: Vec<String> = names.into_iter().skip(offset).take(limit).collect();
+            let count = page.len();
+            tool_ok(
+                id,
+                json!({
+                    "target": name,
+                    "backend": "mongo",
+                    "objects": page,
+                    "meta": {
+                        "count": count,
+                        "total_found": total,
+                        "offset": offset,
+                        "truncated": offset + count < total,
+                        "cached": from_cache
+                    }
+                }),
+            )
         }
         BackendKind::Redis => {
             let db = server.redis_databases.get(&name).unwrap().clone();
@@ -784,7 +954,7 @@ async fn handle_list_objects(id: Value, args: Value, server: &Arc<Server>) -> Js
                         "target": name,
                         "backend": "redis",
                         "scan": redis_result_json(&result, &name, 0),
-                        "note": "Single SCAN cursor step — refine pattern rather than full keyspace dump"
+                        "note": "Single SCAN cursor step — refine pattern rather than full keyspace dump (not schema-cached)"
                     }),
                 ),
                 Err(e) => tool_err_db(id, &e),
@@ -797,32 +967,70 @@ async fn handle_describe_object(id: Value, args: Value, server: &Arc<Server>) ->
     let db_name = args.get("database").and_then(|v| v.as_str());
     let object = match args.get("object").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s,
-        _ => return tool_err(id, "'object' is required"),
+        _ => {
+            return tool_err_client(
+                id,
+                "missing_argument",
+                "'object' is required",
+                Some("Pass a table, collection, or Redis key name"),
+            )
+        }
     };
     let (name, kind) = match server.resolve_target(db_name) {
         Ok(v) => v,
-        Err(e) => return tool_err(id, e),
+        Err(e) => {
+            return tool_err_client(
+                id,
+                "unknown_target",
+                e,
+                Some("Call list_targets and pass a configured database name"),
+            )
+        }
     };
+
+    if let Some(desc) = server.schema_cache.get_describe(&name, object) {
+        let mut v = serde_json::to_value(desc).unwrap_or(json!({}));
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("cached".into(), json!(true));
+        }
+        return tool_ok(id, v);
+    }
 
     match kind {
         BackendKind::Postgres => {
             let db = server.databases.get(&name).unwrap().clone();
             match describe_pg_table(db.as_ref(), object).await {
-                Ok(desc) => tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({}))),
+                Ok(desc) => {
+                    server
+                        .schema_cache
+                        .put_describe(&name, object, desc.clone());
+                    tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({})))
+                }
                 Err(e) => tool_err_db(id, &e),
             }
         }
         BackendKind::Mongo => {
             let db = server.mongo_databases.get(&name).unwrap().clone();
             match describe_mongo_collection(db.as_ref(), object).await {
-                Ok(desc) => tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({}))),
+                Ok(desc) => {
+                    server
+                        .schema_cache
+                        .put_describe(&name, object, desc.clone());
+                    tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({})))
+                }
                 Err(e) => tool_err_db(id, &e),
             }
         }
         BackendKind::Redis => {
             let db = server.redis_databases.get(&name).unwrap().clone();
             match describe_redis_key(db.as_ref(), object).await {
-                Ok(desc) => tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({}))),
+                Ok(desc) => {
+                    // Redis keys change often — shorter usefulness, still cache briefly.
+                    server
+                        .schema_cache
+                        .put_describe(&name, object, desc.clone());
+                    tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({})))
+                }
                 Err(e) => tool_err_db(id, &e),
             }
         }
@@ -833,7 +1041,14 @@ async fn handle_sample_object(id: Value, args: Value, server: &Arc<Server>) -> J
     let db_name = args.get("database").and_then(|v| v.as_str());
     let object = match args.get("object").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s,
-        _ => return tool_err(id, "'object' is required"),
+        _ => {
+            return tool_err_client(
+                id,
+                "missing_argument",
+                "'object' is required",
+                Some("Pass a table or collection name"),
+            )
+        }
     };
     let limit = args
         .get("limit")
@@ -842,7 +1057,14 @@ async fn handle_sample_object(id: Value, args: Value, server: &Arc<Server>) -> J
         .unwrap_or(10);
     let (name, kind) = match server.resolve_target(db_name) {
         Ok(v) => v,
-        Err(e) => return tool_err(id, e),
+        Err(e) => {
+            return tool_err_client(
+                id,
+                "unknown_target",
+                e,
+                Some("Call list_targets and pass a configured database name"),
+            )
+        }
     };
 
     let start = Instant::now();
@@ -867,9 +1089,11 @@ async fn handle_sample_object(id: Value, args: Value, server: &Arc<Server>) -> J
                 Err(e) => tool_err_db(id, &e),
             }
         }
-        BackendKind::Redis => tool_err(
+        BackendKind::Redis => tool_err_client(
             id,
+            "unsupported",
             "sample_object is not supported for Redis; use redis_query (GET/HGETALL/…) or describe_object",
+            Some("Use redis_query or describe_object for Redis keys"),
         ),
     }
 }
@@ -999,15 +1223,69 @@ async fn handle_resources_read(id: Value, params: Value, server: &Arc<Server>) -
 }
 
 async fn handle_sql_query(id: Value, args: Value, server: &Arc<Server>) -> JsonRpcResponse {
+    let cursor_raw = args.get("cursor").and_then(|v| v.as_str());
+    let page_size_arg = args
+        .get("page_size")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+
+    // Cursor-only page: no re-execute.
+    if let Some(c) = cursor_raw {
+        let cursor = match PageCursor::parse(c) {
+            Some(c) => c,
+            None => {
+                return tool_err_client(
+                    id,
+                    "invalid_cursor",
+                    "malformed cursor",
+                    Some("Pass meta.next_cursor from a previous sql_query response unchanged"),
+                )
+            }
+        };
+        let page_size = parse_page_size(&args, 100, 5000);
+        let slice = match server.result_cache.page(&cursor, page_size) {
+            Ok(s) => s,
+            Err(msg) => {
+                return tool_err_client(
+                    id,
+                    "cursor_expired",
+                    msg,
+                    Some("Re-run sql_query with statement (omit cursor) to refresh the buffer"),
+                )
+            }
+        };
+        let target = match &slice.payload {
+            CachedPayload::Postgres { target, .. } => target.clone(),
+            _ => {
+                return tool_err_client(
+                    id,
+                    "cursor_mismatch",
+                    "cursor does not refer to a Postgres result",
+                    Some("Use the cursor only with the same tool that issued it"),
+                )
+            }
+        };
+        let result = pg_result_from_payload(&slice.payload).unwrap();
+        let page = page_meta_from_slice(&slice, true);
+        let text = if wants_table(&args) {
+            format_result(&result)
+        } else {
+            serde_json::to_string_pretty(&query_result_json_with_page(
+                &result, &target, "postgres", 0, &page,
+            ))
+            .unwrap_or_default()
+        };
+        return JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }));
+    }
+
     let statement = match args.get("statement").and_then(|v| v.as_str()) {
         Some(s) if !s.trim().is_empty() => s.to_string(),
         _ => {
-            return JsonRpcResponse::ok(
+            return tool_err_client(
                 id,
-                json!({
-                    "content": [{"type": "text", "text": "Error: 'statement' is required and must be non-empty"}],
-                    "isError": true
-                }),
+                "missing_argument",
+                "'statement' is required and must be non-empty (unless paging with cursor)",
+                Some("Provide statement, or cursor from a prior page"),
             )
         }
     };
@@ -1016,12 +1294,11 @@ async fn handle_sql_query(id: Value, args: Value, server: &Arc<Server>) -> JsonR
     let db = match server.resolve_db(db_name) {
         Ok(db) => db,
         Err(msg) => {
-            return JsonRpcResponse::ok(
+            return tool_err_client(
                 id,
-                json!({
-                    "content": [{"type": "text", "text": format!("Error: {}", msg)}],
-                    "isError": true
-                }),
+                "unknown_target",
+                msg,
+                Some("Call list_targets; pass database when multiple Postgres targets exist"),
             )
         }
     };
@@ -1041,11 +1318,23 @@ async fn handle_sql_query(id: Value, args: Value, server: &Arc<Server>) -> JsonR
     match db.execute_query(&statement, max_rows).await {
         Ok(result) => {
             let ms = start.elapsed().as_millis();
+            let page_size = page_size_arg.unwrap_or(result.row_count.max(1));
+            let slice = server
+                .result_cache
+                .store_and_page(CachedPayload::from_pg(&result, &target), page_size);
+            let page_result = pg_result_from_payload(&slice.payload).unwrap();
+            let page = page_meta_from_slice(&slice, false);
             let text = if wants_table(&args) {
-                format_result(&result)
+                format_result(&page_result)
             } else {
-                serde_json::to_string_pretty(&query_result_json(&result, &target, "postgres", ms))
-                    .unwrap_or_default()
+                serde_json::to_string_pretty(&query_result_json_with_page(
+                    &page_result,
+                    &target,
+                    "postgres",
+                    ms,
+                    &page,
+                ))
+                .unwrap_or_default()
             };
             JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }))
         }
@@ -1054,16 +1343,61 @@ async fn handle_sql_query(id: Value, args: Value, server: &Arc<Server>) -> JsonR
 }
 
 async fn handle_mongo_query(id: Value, args: Value, server: &Arc<Server>) -> JsonRpcResponse {
+    if let Some(c) = args.get("cursor").and_then(|v| v.as_str()) {
+        let cursor = match PageCursor::parse(c) {
+            Some(c) => c,
+            None => {
+                return tool_err_client(
+                    id,
+                    "invalid_cursor",
+                    "malformed cursor",
+                    Some("Pass meta.next_cursor from a previous mongo_query response unchanged"),
+                )
+            }
+        };
+        let page_size = parse_page_size(&args, 100, 1000);
+        let slice = match server.result_cache.page(&cursor, page_size) {
+            Ok(s) => s,
+            Err(msg) => {
+                return tool_err_client(
+                    id,
+                    "cursor_expired",
+                    msg,
+                    Some("Re-run mongo_query without cursor to refresh the buffer"),
+                )
+            }
+        };
+        let target = match &slice.payload {
+            CachedPayload::Mongo { target, .. } => target.clone(),
+            _ => {
+                return tool_err_client(
+                    id,
+                    "cursor_mismatch",
+                    "cursor does not refer to a Mongo result",
+                    None,
+                )
+            }
+        };
+        let result = mongo_result_from_payload(&slice.payload).unwrap();
+        let page = page_meta_from_slice(&slice, true);
+        let text = if wants_table(&args) {
+            format_mongo_result(&result)
+        } else {
+            serde_json::to_string_pretty(&mongo_result_json_with_page(&result, &target, 0, &page))
+                .unwrap_or_default()
+        };
+        return JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }));
+    }
+
     let db_name = args.get("database").and_then(|v| v.as_str());
     let db = match server.resolve_mongo(db_name) {
         Ok(db) => db,
         Err(msg) => {
-            return JsonRpcResponse::ok(
+            return tool_err_client(
                 id,
-                json!({
-                    "content": [{"type": "text", "text": format!("Error: {}", msg)}],
-                    "isError": true
-                }),
+                "unknown_target",
+                msg,
+                Some("Call list_targets; pass database when multiple Mongo targets exist"),
             )
         }
     };
@@ -1075,12 +1409,11 @@ async fn handle_mongo_query(id: Value, args: Value, server: &Arc<Server>) -> Jso
     let operation = match MongoOperation::from_str(operation_str) {
         Ok(op) => op,
         Err(msg) => {
-            return JsonRpcResponse::ok(
+            return tool_err_client(
                 id,
-                json!({
-                    "content": [{"type": "text", "text": format!("Error: {}", msg)}],
-                    "isError": true
-                }),
+                "invalid_argument",
+                msg,
+                Some("operation must be find, aggregate, distinct, count, list_collections, or list_indexes"),
             )
         }
     };
@@ -1129,11 +1462,26 @@ async fn handle_mongo_query(id: Value, args: Value, server: &Arc<Server>) -> Jso
     match db.execute_mongo(query).await {
         Ok(result) => {
             let ms = start.elapsed().as_millis();
+            let page_size = args
+                .get("page_size")
+                .and_then(|v| v.as_u64())
+                .map(|v| (v as usize).clamp(1, 1000))
+                .unwrap_or(result.count.max(1));
+            let slice = server
+                .result_cache
+                .store_and_page(CachedPayload::from_mongo(&result, &target), page_size);
+            let page_result = mongo_result_from_payload(&slice.payload).unwrap();
+            let page = page_meta_from_slice(&slice, false);
             let text = if wants_table(&args) {
-                format_mongo_result(&result)
+                format_mongo_result(&page_result)
             } else {
-                serde_json::to_string_pretty(&mongo_result_json(&result, &target, ms))
-                    .unwrap_or_default()
+                serde_json::to_string_pretty(&mongo_result_json_with_page(
+                    &page_result,
+                    &target,
+                    ms,
+                    &page,
+                ))
+                .unwrap_or_default()
             };
             JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }))
         }
@@ -1142,15 +1490,60 @@ async fn handle_mongo_query(id: Value, args: Value, server: &Arc<Server>) -> Jso
 }
 
 async fn handle_redis_query(id: Value, args: Value, server: &Arc<Server>) -> JsonRpcResponse {
+    if let Some(c) = args.get("cursor").and_then(|v| v.as_str()) {
+        let cursor = match PageCursor::parse(c) {
+            Some(c) => c,
+            None => {
+                return tool_err_client(
+                    id,
+                    "invalid_cursor",
+                    "malformed cursor",
+                    Some("Pass meta.next_cursor from a previous redis_query response unchanged"),
+                )
+            }
+        };
+        let page_size = parse_page_size(&args, 100, 1000);
+        let slice = match server.result_cache.page(&cursor, page_size) {
+            Ok(s) => s,
+            Err(msg) => {
+                return tool_err_client(
+                    id,
+                    "cursor_expired",
+                    msg,
+                    Some("Re-run redis_query without cursor to refresh the buffer"),
+                )
+            }
+        };
+        let target = match &slice.payload {
+            CachedPayload::Redis { target, .. } => target.clone(),
+            _ => {
+                return tool_err_client(
+                    id,
+                    "cursor_mismatch",
+                    "cursor does not refer to a Redis result",
+                    None,
+                )
+            }
+        };
+        let result = redis_result_from_payload(&slice.payload).unwrap();
+        let page = page_meta_from_slice(&slice, true);
+        let text = if wants_table(&args) {
+            format_redis_result(&result)
+        } else {
+            serde_json::to_string_pretty(&redis_result_json_with_page(&result, &target, 0, &page))
+                .unwrap_or_default()
+        };
+        return JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }));
+    }
+
     let command = match args.get("command").and_then(|v| v.as_str()) {
         Some(s) if !s.trim().is_empty() => s.to_string(),
         _ => {
-            return JsonRpcResponse::ok(
+            return tool_err_client(
                 id,
-                json!({
-                    "content": [{"type": "text", "text": "Error: 'command' is required and must be non-empty"}],
-                    "isError": true
-                }),
+                "missing_argument",
+                "'command' is required and must be non-empty (unless paging with cursor)",
+                Some("Provide command + args, or cursor from a prior page"),
             )
         }
     };
@@ -1159,12 +1552,11 @@ async fn handle_redis_query(id: Value, args: Value, server: &Arc<Server>) -> Jso
     let db = match server.resolve_redis(db_name) {
         Ok(db) => db,
         Err(msg) => {
-            return JsonRpcResponse::ok(
+            return tool_err_client(
                 id,
-                json!({
-                    "content": [{"type": "text", "text": format!("Error: {}", msg)}],
-                    "isError": true
-                }),
+                "unknown_target",
+                msg,
+                Some("Call list_targets; pass database when multiple Redis targets exist"),
             )
         }
     };
@@ -1201,11 +1593,26 @@ async fn handle_redis_query(id: Value, args: Value, server: &Arc<Server>) -> Jso
     match db.execute_redis(query).await {
         Ok(result) => {
             let ms = start.elapsed().as_millis();
+            let page_size = args
+                .get("page_size")
+                .and_then(|v| v.as_u64())
+                .map(|v| (v as usize).clamp(1, 1000))
+                .unwrap_or(result.count.max(1));
+            let slice = server
+                .result_cache
+                .store_and_page(CachedPayload::from_redis(&result, &target), page_size);
+            let page_result = redis_result_from_payload(&slice.payload).unwrap();
+            let page = page_meta_from_slice(&slice, false);
             let text = if wants_table(&args) {
-                format_redis_result(&result)
+                format_redis_result(&page_result)
             } else {
-                serde_json::to_string_pretty(&redis_result_json(&result, &target, ms))
-                    .unwrap_or_default()
+                serde_json::to_string_pretty(&redis_result_json_with_page(
+                    &page_result,
+                    &target,
+                    ms,
+                    &page,
+                ))
+                .unwrap_or_default()
             };
             JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }))
         }

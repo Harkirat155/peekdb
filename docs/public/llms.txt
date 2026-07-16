@@ -18,7 +18,9 @@ peekdb is a single Rust binary that:
 ## Install (for agents)
 
 ```bash
-cargo install --git https://github.com/Harkirat155/peekdb
+cargo install peekdb
+# or: cargo install --git https://github.com/Harkirat155/peekdb
+# or: cargo binstall peekdb
 # or download a release binary from https://github.com/Harkirat155/peekdb/releases
 peekdb init
 # edit ~/.config/peekdb/databases.toml — use ${ENV_VAR} for passwords
@@ -55,11 +57,17 @@ Or run with no args when `DATABASE_URL` is set (defaults to `serve`).
 | `list_objects` | Tables / collections / Redis SCAN for a target |
 | `describe_object` | Columns/indexes (PG), fields+indexes (Mongo), TYPE/TTL (Redis) |
 | `sample_object` | Sample rows/docs (PG/Mongo) |
-| `sql_query` | Read-only SQL (SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE). Default result: JSON. |
-| `mongo_query` | find/aggregate/distinct/count/list_*. $out/$merge blocked at any depth. |
-| `redis_query` | Allowlisted read commands only |
+| `sql_query` | Read-only SQL (SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE). Default result: JSON. Supports `page_size` + `cursor`. |
+| `mongo_query` | find/aggregate/distinct/count/list_*. $out/$merge blocked at any depth. Supports `page_size` + `cursor`. |
+| `redis_query` | Allowlisted read commands only. Supports `page_size` + `cursor`. |
 
 Optional: `format: "table"` on query tools for ASCII tables.
+
+Paging: first call may set `page_size`; if more rows remain in the buffer, `meta.next_cursor`
+is set — call again with only `cursor` (and optional `page_size`) to continue **without**
+re-running the query. Cursors expire (`PEEKDB_RESULT_CACHE_TTL_SECS`, default 120).
+
+Discovery (`list_objects` / `describe_object`) is TTL-cached (`PEEKDB_SCHEMA_CACHE_TTL_SECS`, default 60).
 
 ## MCP resources
 
@@ -94,7 +102,8 @@ Tool failures set `isError: true` and return JSON text:
 
 Useful codes: `not_allowed_statement`, `embedded_write`, `multiple_statements`,
 `blocked_keyword`, `not_allowed_object`, `rate_limited`, `response_too_large`,
-`query_failed`, `connection_failed`.
+`query_failed`, `connection_failed`, `unknown_target`, `missing_argument`,
+`invalid_cursor`, `cursor_expired`, `cursor_mismatch`.
 
 ## Security guarantees (short)
 

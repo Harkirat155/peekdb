@@ -74,11 +74,12 @@ Ship distribution and deepen the RO story without changing the product promise.
 | Client-side DML-in-CTE / embedded write rejection | **Done** (this track) | `DbError::EmbeddedWrite`; audit as `blocked` |
 | Structured MCP errors (`code` / `layer` / `hint`) | **Done** (this track) | Agents distinguish allowlist vs rate limit vs DB errors |
 | ROADMAP accuracy | **Done** (this track) | Phase 3 no longer listed as open |
-| crates.io publish | Open | Manual; see [RELEASING.md](RELEASING.md) — package metadata / excludes first |
-| Install polish (`cargo binstall`, site one-liners) | Open | After crates.io name is live |
+| crates.io publish | Ready | Metadata + install docs; run manual `cargo publish` (see RELEASING.md) |
+| Install polish (`cargo install` / `binstall` / git / releases) | **Done** | README + site + llms.txt |
 | Homebrew tap | Deferred | Wait for external demand |
-| Schema cache (TTL) for discovery tools | Open | Fewer round-trips in long agent sessions |
-| Result pagination / cursors | Open | Large result sets without re-running full queries |
+| Schema cache (TTL) for discovery tools | **Done** | `PEEKDB_SCHEMA_CACHE_TTL_SECS` (default 60) |
+| Result pagination / cursors | **Done** | `page_size` + `cursor` / `meta.next_cursor`; `PEEKDB_RESULT_CACHE_TTL_SECS` |
+| Structured client MCP errors | **Done** | Same envelope as DbError (`unknown_target`, `missing_argument`, …) |
 | Multi-backend REPL | Open | Only if dogfooded daily |
 | Full TUI `explore` | Open | Menu-driven is enough until it isn’t |
 | Shared rate limits across processes | Open | Optional; document process-local clearly for now |
