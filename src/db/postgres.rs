@@ -16,10 +16,47 @@ use tracing::{debug, error, info, warn};
 // is defense-in-depth, not the sole guarantee.
 //
 // TABLE is Postgres shorthand for `SELECT * FROM`; VALUES is a literal row constructor.
-// Known, accepted gap: a leading `WITH` permits `WITH d AS (DELETE FROM t RETURNING *)
-// SELECT * FROM d` — a CTE body can write. Closing that fully needs a real SQL parser
-// (out of scope here); the read-only transaction wrapper is what actually stops it.
+//
+// Data-modifying CTEs (`WITH d AS (DELETE … RETURNING *) SELECT …`) and
+// `WITH … INSERT/UPDATE/…` forms start with an allowed `WITH` but still write.
+// Those are caught by `reject_embedded_writes`, which scans the statement for write
+// keywords outside string/comment/quoted-identifier contexts (not a full SQL parser).
 const ALLOWED_LEADING_KEYWORDS: &[&str] = &["SELECT", "WITH", "EXPLAIN", "SHOW", "VALUES", "TABLE"];
+
+/// Keywords that must not appear as bare SQL words inside an otherwise allowlisted
+/// statement. Applied after the leading-keyword check so string-literal false
+/// positives of the old whole-text blocklist do not return.
+const EMBEDDED_WRITE_KEYWORDS: &[&str] = &[
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "MERGE",
+    "DROP",
+    "CREATE",
+    "ALTER",
+    "TRUNCATE",
+    "GRANT",
+    "REVOKE",
+    "COPY",
+    "CALL",
+    "DO",
+    "EXECUTE",
+    "EXEC",
+    "VACUUM",
+    "CLUSTER",
+    "REINDEX",
+    "REFRESH",
+    "IMPORT",
+    // Bare ANALYZE (not EXPLAIN ANALYZE — EXPLAIN is stripped first).
+    "ANALYZE",
+    "ANALYSE",
+    "SET",
+    "COMMIT",
+    "ROLLBACK",
+    "SAVEPOINT",
+    "RELEASE",
+    "LOCK",
+];
 
 // Bare/legacy EXPLAIN option words (e.g. `EXPLAIN ANALYZE ...`) and FORMAT's value
 // words, skipped over when locating the statement EXPLAIN actually wraps — so
@@ -162,18 +199,147 @@ impl PostgresDb {
         }
 
         let leading = leading_word(body);
-        if !leading.is_empty()
-            && ALLOWED_LEADING_KEYWORDS
+        if leading.is_empty()
+            || !ALLOWED_LEADING_KEYWORDS
                 .iter()
                 .any(|k| leading.eq_ignore_ascii_case(k))
         {
-            Ok(())
-        } else {
-            Err(DbError::NotAllowedStatement {
+            return Err(DbError::NotAllowedStatement {
                 leading: leading.to_uppercase(),
-            })
+            });
         }
+
+        // Data-modifying CTEs and `WITH … INSERT/UPDATE/…` are the forms that start
+        // with an allowed keyword but still write. Plain SELECT/SHOW/… do not get
+        // this scan (avoids rare false positives on unquoted columns named `delete`).
+        if leading.eq_ignore_ascii_case("WITH") {
+            reject_embedded_writes(body)?;
+        }
+        Ok(())
     }
+}
+
+/// Reject bare write keywords outside strings, comments, and quoted identifiers.
+/// Closes the classic data-modifying CTE gap without resurrecting the old
+/// whole-text blocklist false positives (`SELECT 'DROP TABLE users'`).
+fn reject_embedded_writes(sql: &str) -> Result<(), DbError> {
+    let bytes = sql.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+
+        // Line comment
+        if c == '-' && bytes.get(i + 1) == Some(&b'-') {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Block comment
+        if c == '/' && bytes.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        // Single-quoted string (including E'...' / U&'...' prefixes already past)
+        if c == '\'' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    if bytes.get(i + 1) == Some(&b'\'') {
+                        i += 2; // escaped ''
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // Double-quoted identifier
+        if c == '"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'"' {
+                    if bytes.get(i + 1) == Some(&b'"') {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // Dollar-quoted string: $tag$ ... $tag$ or $$ ... $$
+        if c == '$' {
+            if let Some(end_tag) = dollar_quote_tag_end(sql, i) {
+                let tag = &sql[i..end_tag];
+                i = end_tag;
+                // find closing tag
+                if let Some(rel) = sql[i..].find(tag) {
+                    i += rel + tag.len();
+                } else {
+                    i = bytes.len();
+                }
+                continue;
+            }
+        }
+
+        // Identifier / keyword
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                let ch = bytes[i] as char;
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let word = &sql[start..i];
+            if EMBEDDED_WRITE_KEYWORDS
+                .iter()
+                .any(|k| word.eq_ignore_ascii_case(k))
+            {
+                return Err(DbError::EmbeddedWrite {
+                    keyword: word.to_ascii_uppercase(),
+                });
+            }
+            continue;
+        }
+
+        i += 1;
+    }
+    Ok(())
+}
+
+/// If `sql[i..]` starts a dollar-quote tag (`$` or `$tag$`), return the index
+/// just past the opening tag. Otherwise `None` (e.g. `$1` parameter).
+fn dollar_quote_tag_end(sql: &str, i: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    if bytes.get(i) != Some(&b'$') {
+        return None;
+    }
+    let mut j = i + 1;
+    while j < bytes.len() {
+        let ch = bytes[j] as char;
+        if ch == '$' {
+            return Some(j + 1);
+        }
+        if !(ch.is_ascii_alphanumeric() || ch == '_') {
+            return None; // `$1` style, not a dollar quote
+        }
+        j += 1;
+    }
+    None
 }
 
 async fn connect_plain(url: &str) -> Result<tokio_postgres::Client, DbError> {
@@ -500,6 +666,67 @@ mod tests {
             Err(DbError::NotAllowedStatement { leading }) => assert_eq!(leading, "PRAGMA"),
             other => panic!("expected rejection, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn data_modifying_cte_is_rejected_client_side() {
+        for sql in [
+            "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+            "WITH d AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM d",
+            "WITH d AS (UPDATE t SET x = 1 RETURNING *) SELECT * FROM d",
+            "WITH d AS (MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE RETURNING *) SELECT * FROM d",
+            "with d as (delete from t returning *) select * from d",
+            "EXPLAIN WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+            "EXPLAIN ANALYZE WITH d AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM d",
+        ] {
+            assert!(
+                matches!(
+                    PostgresDb::check_allowed(sql),
+                    Err(DbError::EmbeddedWrite { .. })
+                ),
+                "{sql:?} should be rejected as embedded write"
+            );
+        }
+    }
+
+    #[test]
+    fn with_followed_by_main_write_is_rejected() {
+        for sql in [
+            "WITH x AS (SELECT 1 AS n) INSERT INTO t SELECT n FROM x",
+            "WITH x AS (SELECT 1) UPDATE t SET x = 1",
+            "WITH x AS (SELECT 1) DELETE FROM t",
+        ] {
+            assert!(
+                matches!(
+                    PostgresDb::check_allowed(sql),
+                    Err(DbError::EmbeddedWrite { .. })
+                ),
+                "{sql:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn write_keyword_inside_string_or_comment_in_with_is_not_a_false_positive() {
+        for sql in [
+            "WITH x AS (SELECT 'DELETE FROM t' AS s) SELECT * FROM x",
+            "WITH x AS (SELECT 1) SELECT 'INSERT' AS s",
+            "WITH x AS (SELECT 1 /* DELETE */ ) SELECT * FROM x",
+            "WITH x AS (SELECT 1) SELECT * FROM x -- DELETE FROM t",
+            "WITH x AS (SELECT $$DELETE FROM t$$ AS s) SELECT * FROM x",
+            r#"WITH x AS (SELECT 1 AS "DELETE") SELECT "DELETE" FROM x"#,
+        ] {
+            assert!(
+                PostgresDb::check_allowed(sql).is_ok(),
+                "{sql:?} should be allowed (write keyword only in string/comment/ident)"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_select_with_column_named_delete_still_allowed() {
+        // Embedded-write scan is WITH-only, so this must not trip.
+        assert!(PostgresDb::check_allowed("SELECT delete FROM t").is_ok());
     }
 
     #[tokio::test]

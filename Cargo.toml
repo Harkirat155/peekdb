@@ -2,12 +2,23 @@
 name = "peekdb"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.74"
 description = "Fast, read-only CLI (and MCP server) for safely exploring Postgres, MongoDB, and Redis"
 license = "MIT"
 repository = "https://github.com/Harkirat155/peekdb"
+homepage = "https://harkirat155.github.io/peekdb/"
+documentation = "https://github.com/Harkirat155/peekdb#readme"
 readme = "README.md"
-keywords = ["cli", "database", "postgresql", "mongodb", "redis"]
-categories = ["database", "command-line-utilities"]
+keywords = ["cli", "database", "postgresql", "mongodb", "redis", "mcp"]
+categories = ["database", "command-line-utilities", "development-tools"]
+exclude = [
+    ".DS_Store",
+    "docs/node_modules/*",
+    "docs/dist/*",
+    "target/*",
+    "mcp-debug-wrapper.sh",
+    "databases.toml",
+]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

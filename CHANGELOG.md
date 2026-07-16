@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Postgres client-side rejection of data-modifying CTEs and `WITH … INSERT/UPDATE/…`
+  (`DbError::EmbeddedWrite`), with unit + integration coverage
+- MCP tool errors return structured JSON: `error.message` / `code` / `layer` / optional `hint`
+- Crate metadata for crates.io readiness (`rust-version`, homepage, exclude list)
+
+### Changed
+
+- ROADMAP Phase 4 spelled out; Phase 3 no longer listed as open
+- README / llms.txt document embedded-write scan and structured MCP errors
+
 ## [0.2.0] - 2026-07-11
 
 ### Added

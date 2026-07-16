@@ -17,7 +17,8 @@ backend, not a single "please be careful" check:
 1. **Transaction-level** — every query runs inside `BEGIN TRANSACTION READ ONLY … ROLLBACK`. PostgreSQL itself blocks `SET TRANSACTION READ WRITE` escalation inside a read-only transaction.
 2. **Session-level** — the connection opens with `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` as a second layer.
 3. **Statement allowlist** — a query is only sent to the database if it *starts with* `SELECT`, `WITH`, `EXPLAIN`, `SHOW`, `VALUES`, or `TABLE`; everything else (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `CREATE`, `ALTER`, `GRANT`, `COPY`, `SET`, …) is rejected before it reaches the database. `EXPLAIN`'s own leading keyword doesn't exempt the statement it wraps — `EXPLAIN ANALYZE INSERT …` is still rejected.
-4. **Single-statement enforcement** — interior `;` chains are rejected, preventing `SET …; INSERT …` patterns.
+4. **Embedded-write scan** — statements that start with `WITH` are scanned for write keywords *outside* string literals, comments, and quoted identifiers, so data-modifying CTEs (`WITH d AS (DELETE … RETURNING *) SELECT …`) and `WITH … INSERT …` forms are rejected client-side (not only by the RO transaction).
+5. **Single-statement enforcement** — interior `;` chains are rejected, preventing `SET …; INSERT …` patterns.
 
 **MongoDB:**
 1. **Operation allowlist** — only `find`, `aggregate`, `distinct`, `count`, `list_collections`, and `list_indexes` are accepted.
@@ -289,7 +290,9 @@ Add to `~/.claude/mcp.json` (or the Claude Desktop / Cursor equivalent):
 Once configured, the AI has discovery tools first (`list_targets`, `list_objects`,
 `describe_object`, `sample_object`), then `sql_query` / `mongo_query` / `redis_query`.
 Query tools return **structured JSON by default** (columns/rows + meta); pass
-`"format": "table"` for ASCII. Schema is also exposed as MCP resources
+`"format": "table"` for ASCII. Failures return MCP `isError` with a JSON body
+`{ "error": { "message", "code", "layer", "hint?" } }` so agents can tell allowlist
+blocks from connection errors. Schema is also exposed as MCP resources
 (`peekdb://{target}/schema`, `peekdb://{target}/tables/{name}`).
 
 ### `list_targets` / `list_objects` / `describe_object` / `sample_object`
@@ -392,6 +395,7 @@ redact_patterns = ["*ssn*"]
 | Threat | PostgreSQL mitigation | MongoDB mitigation | Redis mitigation |
 |--------|----------------------|-------------------|-------------------|
 | Prompt injection write attempt | Leading-statement allowlist rejects before DB; `BEGIN TRANSACTION READ ONLY` rejects at DB regardless | Operation allowlist: only read operations accepted | Command allowlist: only read commands accepted |
+| Data-modifying CTE / `WITH … INSERT` | Embedded-write scan on `WITH` bodies (outside strings/comments); RO transaction is still the backstop | N/A | N/A |
 | `SET TRANSACTION READ WRITE` escalation | `SET` isn't an allowed leading statement; PostgreSQL also blocks it inside a read-only transaction | N/A | N/A |
 | Aggregation pipeline writing to a collection | N/A | `$out` and `$merge` stages are detected and blocked before execution | N/A |
 | Statement chaining (`SET …; INSERT …`) | Single-statement enforcement: interior `;` is rejected | N/A | N/A (one command per call by construction) |

@@ -87,10 +87,19 @@ peekdb audit --blocked
 peekdb fav save daily --sql "SELECT now()"
 ```
 
+## Errors (MCP)
+
+Tool failures set `isError: true` and return JSON text:
+`{"error":{"message":"...","code":"embedded_write|not_allowed_statement|…","layer":"…","hint":"…?"}}`
+
+Useful codes: `not_allowed_statement`, `embedded_write`, `multiple_statements`,
+`blocked_keyword`, `not_allowed_object`, `rate_limited`, `response_too_large`,
+`query_failed`, `connection_failed`.
+
 ## Security guarantees (short)
 
 - No write mode / no --write flag
-- Postgres: statement allowlist + single-statement + session RO + transaction RO
+- Postgres: statement allowlist + WITH embedded-write scan + single-statement + session RO + transaction RO
 - Mongo: op allowlist + recursive $out/$merge block (incl. $facet/$lookup)
 - Redis: deny-by-default command allowlist
 - Audit log never stores connection strings

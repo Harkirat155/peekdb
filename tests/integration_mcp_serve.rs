@@ -219,10 +219,15 @@ fn mcp_serve_enforces_read_only_identically_to_the_direct_cli() {
     );
     let resp = read_frame(&mut reader);
     assert_eq!(resp["result"]["isError"], json!(true));
-    assert!(resp["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("Not allowed"));
+    let blocked_txt = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        blocked_txt.contains("Not allowed") || blocked_txt.contains("not_allowed_statement"),
+        "expected structured allowlist error, got: {blocked_txt}"
+    );
+    assert!(
+        blocked_txt.contains("\"code\"") && blocked_txt.contains("\"layer\""),
+        "MCP DbError should include code/layer JSON, got: {blocked_txt}"
+    );
 
     // Allowed mongo find succeeds over MCP.
     send_frame(

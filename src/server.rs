@@ -674,6 +674,29 @@ fn tool_err(id: Value, msg: impl std::fmt::Display) -> JsonRpcResponse {
     )
 }
 
+/// Structured error envelope for agents: stable `code` / `layer` / optional `hint`
+/// plus human `message`. Still MCP `isError: true` with a single text content block.
+fn tool_err_db(id: Value, err: &crate::db::traits::DbError) -> JsonRpcResponse {
+    let mut body = json!({
+        "error": {
+            "message": err.to_string(),
+            "code": err.code(),
+            "layer": err.layer(),
+        }
+    });
+    if let Some(hint) = err.hint() {
+        body["error"]["hint"] = json!(hint);
+    }
+    let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| format!("Error: {err}"));
+    JsonRpcResponse::ok(
+        id,
+        json!({
+            "content": [{"type": "text", "text": text}],
+            "isError": true
+        }),
+    )
+}
+
 fn wants_table(args: &Value) -> bool {
     args.get("format")
         .and_then(|v| v.as_str())
@@ -727,7 +750,7 @@ async fn handle_list_objects(id: Value, args: Value, server: &Arc<Server>) -> Js
                         }),
                     )
                 }
-                Err(e) => tool_err(id, e),
+                Err(e) => tool_err_db(id, &e),
             }
         }
         BackendKind::Mongo => {
@@ -748,7 +771,7 @@ async fn handle_list_objects(id: Value, args: Value, server: &Arc<Server>) -> Js
                         }),
                     )
                 }
-                Err(e) => tool_err(id, e),
+                Err(e) => tool_err_db(id, &e),
             }
         }
         BackendKind::Redis => {
@@ -764,7 +787,7 @@ async fn handle_list_objects(id: Value, args: Value, server: &Arc<Server>) -> Js
                         "note": "Single SCAN cursor step — refine pattern rather than full keyspace dump"
                     }),
                 ),
-                Err(e) => tool_err(id, e),
+                Err(e) => tool_err_db(id, &e),
             }
         }
     }
@@ -786,21 +809,21 @@ async fn handle_describe_object(id: Value, args: Value, server: &Arc<Server>) ->
             let db = server.databases.get(&name).unwrap().clone();
             match describe_pg_table(db.as_ref(), object).await {
                 Ok(desc) => tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({}))),
-                Err(e) => tool_err(id, e),
+                Err(e) => tool_err_db(id, &e),
             }
         }
         BackendKind::Mongo => {
             let db = server.mongo_databases.get(&name).unwrap().clone();
             match describe_mongo_collection(db.as_ref(), object).await {
                 Ok(desc) => tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({}))),
-                Err(e) => tool_err(id, e),
+                Err(e) => tool_err_db(id, &e),
             }
         }
         BackendKind::Redis => {
             let db = server.redis_databases.get(&name).unwrap().clone();
             match describe_redis_key(db.as_ref(), object).await {
                 Ok(desc) => tool_ok(id, serde_json::to_value(desc).unwrap_or(json!({}))),
-                Err(e) => tool_err(id, e),
+                Err(e) => tool_err_db(id, &e),
             }
         }
     }
@@ -831,7 +854,7 @@ async fn handle_sample_object(id: Value, args: Value, server: &Arc<Server>) -> J
                     let ms = start.elapsed().as_millis();
                     tool_ok(id, query_result_json(&result, &name, "postgres", ms))
                 }
-                Err(e) => tool_err(id, e),
+                Err(e) => tool_err_db(id, &e),
             }
         }
         BackendKind::Mongo => {
@@ -841,7 +864,7 @@ async fn handle_sample_object(id: Value, args: Value, server: &Arc<Server>) -> J
                     let ms = start.elapsed().as_millis();
                     tool_ok(id, mongo_result_json(&result, &name, ms))
                 }
-                Err(e) => tool_err(id, e),
+                Err(e) => tool_err_db(id, &e),
             }
         }
         BackendKind::Redis => tool_err(
@@ -1026,7 +1049,7 @@ async fn handle_sql_query(id: Value, args: Value, server: &Arc<Server>) -> JsonR
             };
             JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }))
         }
-        Err(e) => tool_err(id, e),
+        Err(e) => tool_err_db(id, &e),
     }
 }
 
@@ -1114,7 +1137,7 @@ async fn handle_mongo_query(id: Value, args: Value, server: &Arc<Server>) -> Jso
             };
             JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }))
         }
-        Err(e) => tool_err(id, e),
+        Err(e) => tool_err_db(id, &e),
     }
 }
 
@@ -1186,7 +1209,7 @@ async fn handle_redis_query(id: Value, args: Value, server: &Arc<Server>) -> Jso
             };
             JsonRpcResponse::ok(id, json!({ "content": [{"type": "text", "text": text}] }))
         }
-        Err(e) => tool_err(id, e),
+        Err(e) => tool_err_db(id, &e),
     }
 }
 
