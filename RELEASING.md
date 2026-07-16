@@ -48,6 +48,9 @@ happens by accident or by a CI job with too much authority.
 
 Not run as part of the tag workflow above — deliberately manual.
 
+Package metadata (`rust-version`, homepage, documentation, `exclude`) is maintained in
+`Cargo.toml` so dry-run should stay clean.
+
 ```bash
 cargo publish --dry-run   # validates packaging without uploading anything
 cargo publish             # this step is irreversible: a version can never be un-published,
@@ -56,6 +59,9 @@ cargo publish             # this step is irreversible: a version can never be un
 
 Before running the real `cargo publish`, double check the package name isn't already taken
 on crates.io and that you're logged in as the intended account (`cargo login`).
+
+After the first successful publish, prefer documenting `cargo install peekdb` (already in
+README / site / `llms.txt`) over git-only install.
 
 ## Homebrew tap
 

@@ -10,11 +10,16 @@ All notable changes to this project are documented here.
   (`DbError::EmbeddedWrite`), with unit + integration coverage
 - MCP tool errors return structured JSON: `error.message` / `code` / `layer` / optional `hint`
 - Crate metadata for crates.io readiness (`rust-version`, homepage, exclude list)
+- MCP schema cache for `list_objects` / `describe_object` (`PEEKDB_SCHEMA_CACHE_TTL_SECS`)
+- MCP result paging: `page_size` + `cursor` / `meta.next_cursor` on sql/mongo/redis query tools
+  (`PEEKDB_RESULT_CACHE_TTL_SECS`) so agents page buffers without re-querying
+- Structured client errors (`unknown_target`, `missing_argument`, `invalid_cursor`, …)
+- Install one-liners: `cargo install peekdb`, git, `cargo binstall`, releases (README + site + llms.txt)
 
 ### Changed
 
 - ROADMAP Phase 4 spelled out; Phase 3 no longer listed as open
-- README / llms.txt document embedded-write scan and structured MCP errors
+- README / llms.txt document embedded-write scan, structured MCP errors, cache/cursors
 
 ## [0.2.0] - 2026-07-11
 

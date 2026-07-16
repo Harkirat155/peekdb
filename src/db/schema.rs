@@ -382,11 +382,32 @@ pub async fn describe_redis_key(
 
 // ── MCP result envelopes ──────────────────────────────────────────────────────
 
+/// Optional pagination fields attached to MCP query envelopes.
+#[derive(Debug, Clone, Default)]
+pub struct PageMeta {
+    pub offset: Option<usize>,
+    pub total_buffered: Option<usize>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub source_truncated: Option<bool>,
+    pub cached: bool,
+}
+
 pub fn query_result_json(
     result: &QueryResult,
     target: &str,
     backend: &str,
     duration_ms: u128,
+) -> Value {
+    query_result_json_with_page(result, target, backend, duration_ms, &PageMeta::default())
+}
+
+pub fn query_result_json_with_page(
+    result: &QueryResult,
+    target: &str,
+    backend: &str,
+    duration_ms: u128,
+    page: &PageMeta,
 ) -> Value {
     let rows: Vec<Value> = result
         .rows
@@ -402,53 +423,99 @@ pub fn query_result_json(
             )
         })
         .collect();
+    let mut meta = json!({
+        "target": target,
+        "backend": backend,
+        "row_count": result.row_count,
+        "truncated": result.truncated,
+        "duration_ms": duration_ms
+    });
+    attach_page_meta(&mut meta, page);
     json!({
         "columns": result.columns,
         "rows": rows,
-        "meta": {
-            "target": target,
-            "backend": backend,
-            "row_count": result.row_count,
-            "truncated": result.truncated,
-            "duration_ms": duration_ms
-        }
+        "meta": meta
     })
 }
 
 pub fn mongo_result_json(result: &MongoResult, target: &str, duration_ms: u128) -> Value {
+    mongo_result_json_with_page(result, target, duration_ms, &PageMeta::default())
+}
+
+pub fn mongo_result_json_with_page(
+    result: &MongoResult,
+    target: &str,
+    duration_ms: u128,
+    page: &PageMeta,
+) -> Value {
     let docs: Vec<Value> = result
         .documents
         .iter()
         .filter_map(|s| serde_json::from_str(s).ok())
         .collect();
+    let mut meta = json!({
+        "target": target,
+        "backend": "mongo",
+        "row_count": result.count,
+        "truncated": result.truncated,
+        "duration_ms": duration_ms
+    });
+    attach_page_meta(&mut meta, page);
     json!({
         "documents": docs,
-        "meta": {
-            "target": target,
-            "backend": "mongo",
-            "row_count": result.count,
-            "truncated": result.truncated,
-            "duration_ms": duration_ms
-        }
+        "meta": meta
     })
 }
 
 pub fn redis_result_json(result: &RedisResult, target: &str, duration_ms: u128) -> Value {
+    redis_result_json_with_page(result, target, duration_ms, &PageMeta::default())
+}
+
+pub fn redis_result_json_with_page(
+    result: &RedisResult,
+    target: &str,
+    duration_ms: u128,
+    page: &PageMeta,
+) -> Value {
     let values: Vec<Value> = result
         .values
         .iter()
         .map(|s| serde_json::from_str(s).unwrap_or(Value::String(s.clone())))
         .collect();
+    let mut meta = json!({
+        "target": target,
+        "backend": "redis",
+        "row_count": result.count,
+        "truncated": result.truncated,
+        "duration_ms": duration_ms
+    });
+    attach_page_meta(&mut meta, page);
     json!({
         "values": values,
-        "meta": {
-            "target": target,
-            "backend": "redis",
-            "row_count": result.count,
-            "truncated": result.truncated,
-            "duration_ms": duration_ms
-        }
+        "meta": meta
     })
+}
+
+fn attach_page_meta(meta: &mut Value, page: &PageMeta) {
+    let obj = meta.as_object_mut().expect("meta object");
+    if let Some(o) = page.offset {
+        obj.insert("offset".into(), json!(o));
+    }
+    if let Some(t) = page.total_buffered {
+        obj.insert("total_buffered".into(), json!(t));
+    }
+    if let Some(ref c) = page.next_cursor {
+        obj.insert("next_cursor".into(), json!(c));
+    }
+    if page.has_more {
+        obj.insert("has_more".into(), json!(true));
+    }
+    if let Some(st) = page.source_truncated {
+        obj.insert("source_truncated".into(), json!(st));
+    }
+    if page.cached {
+        obj.insert("cached".into(), json!(true));
+    }
 }
 
 #[cfg(test)]

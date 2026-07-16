@@ -55,7 +55,10 @@ function CopyBlock({
   );
 }
 
-const CARGO = `cargo install --git https://github.com/Harkirat155/peekdb
+const CARGO = `# crates.io (when published) or git:
+cargo install peekdb
+# or: cargo install --git https://github.com/Harkirat155/peekdb
+# or: cargo binstall peekdb   # if cargo-binstall is installed
 # or: GitHub Releases binary for your OS
 peekdb init
 # edit ~/.config/peekdb/databases.toml — use \${ENV_VAR} for passwords

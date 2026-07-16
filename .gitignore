@@ -5,3 +5,4 @@ databases.toml
 mcp-debug-wrapper.sh
 *.debug-wrapper.sh
 audit.jsonl*
+.DS_Store

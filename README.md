@@ -37,6 +37,19 @@ or failed — is recorded in an append-only audit log.
 Download a tarball/zip for your platform from [GitHub Releases](https://github.com/Harkirat155/peekdb/releases)
 — Linux, macOS, and Windows, x86_64 and aarch64.
 
+### Install via Cargo
+
+```bash
+# crates.io (preferred once the crate is published)
+cargo install peekdb
+
+# or from git
+cargo install --git https://github.com/Harkirat155/peekdb
+
+# faster binary install if you have cargo-binstall
+cargo binstall peekdb
+```
+
 ### From source
 
 ```bash
@@ -292,7 +305,16 @@ Once configured, the AI has discovery tools first (`list_targets`, `list_objects
 Query tools return **structured JSON by default** (columns/rows + meta); pass
 `"format": "table"` for ASCII. Failures return MCP `isError` with a JSON body
 `{ "error": { "message", "code", "layer", "hint?" } }` so agents can tell allowlist
-blocks from connection errors. Schema is also exposed as MCP resources
+blocks from connection errors (client validation errors use the same shape).
+
+**Agent session helpers (MCP):**
+- **Schema cache** — `list_objects` / `describe_object` results are TTL-cached in-process
+  (`PEEKDB_SCHEMA_CACHE_TTL_SECS`, default 60). Meta may include `"cached": true`.
+- **Result cursors** — set `page_size` on `sql_query` / `mongo_query` / `redis_query` to
+  page a large buffer; follow `meta.next_cursor` with `cursor` (no re-execute). Buffer TTL:
+  `PEEKDB_RESULT_CACHE_TTL_SECS` (default 120).
+
+Schema is also exposed as MCP resources
 (`peekdb://{target}/schema`, `peekdb://{target}/tables/{name}`).
 
 ### `list_targets` / `list_objects` / `describe_object` / `sample_object`
