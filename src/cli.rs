@@ -61,11 +61,11 @@ fn print_table(columns: &[String], rows: &[Vec<Option<String>>]) {
     const MAX_COL_WIDTH: usize = 80;
 
     // Compute column widths capped at MAX_COL_WIDTH
-    let mut widths: Vec<usize> = columns.iter().map(|c| c.len().min(MAX_COL_WIDTH)).collect();
+    let mut widths: Vec<usize> = columns.iter().map(|c| c.chars().count().min(MAX_COL_WIDTH)).collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
             if i < widths.len() {
-                let len = cell.as_deref().unwrap_or("NULL").len().min(MAX_COL_WIDTH);
+                let len = cell.as_deref().unwrap_or("NULL").chars().count().min(MAX_COL_WIDTH);
                 widths[i] = widths[i].max(len);
             }
         }
@@ -114,9 +114,22 @@ fn print_table(columns: &[String], rows: &[Vec<Option<String>>]) {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_respects_multibyte_chars() {
+        // '₹' is 3 bytes: a byte-index cut at 4 would land inside a char and panic.
+        assert_eq!(truncate("₹₹₹₹₹₹", 5), "₹₹₹₹…");
+        assert_eq!(truncate("café", 4), "café");
+        assert_eq!(truncate("abcdef", 4), "abc…");
     }
 }
