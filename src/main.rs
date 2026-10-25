@@ -4,7 +4,7 @@ mod db;
 mod server;
 
 use clap::{Parser, Subcommand};
-use config::{interpolate_env, Config, DatabaseConfig};
+use config::{interpolate_env, Config, DatabaseConfig, MongoConfig};
 use db::mongo::MongoDb;
 use db::postgres::PostgresDb;
 use db::traits::{Database, MongoDatabase, MongoOperation, MongoQuery};
@@ -178,30 +178,76 @@ fn inject_serve_default(mut args: Vec<String>) -> Vec<String> {
 
 // ── Shared database setup helpers ─────────────────────────────────────────────
 
-async fn build_pg_databases(path: &PathBuf) -> HashMap<String, Arc<dyn Database>> {
-    let config = load_config(path);
+/// Build a lazy Postgres handle, or say why the entry can't be used (never includes values).
+fn build_pg(cfg: &DatabaseConfig) -> Result<Arc<dyn Database>, String> {
+    let url = interpolate_env(&cfg.url)?;
+    Ok(Arc::new(PostgresDb::new(&cfg.name, url, cfg.no_tls)))
+}
+
+/// Build a lazy MongoDB handle, or say why the entry can't be used (never includes values).
+async fn build_mongo(cfg: &MongoConfig) -> Result<Arc<dyn MongoDatabase>, String> {
+    let uri = interpolate_env(&cfg.uri)?;
+    let opts = ClientOptions::parse(&uri)
+        .await
+        .map_err(|_| "URI could not be parsed".to_string())?;
+    let dbname = opts
+        .default_database
+        .ok_or_else(|| "URI must include the database name".to_string())?;
+    Ok(Arc::new(MongoDb::new(&cfg.name, uri, dbname)))
+}
+
+/// An entry that can't be resolved (unset env var, bad URI) is skipped with a warning so the
+/// other databases stay available. `strict` is the one database a one-shot command asked for: fatal.
+fn unresolved(kind: &str, name: &str, err: &str, strict: bool) {
+    if strict {
+        eprintln!("Fatal: {} '{}': {}", kind, name, err);
+        std::process::exit(1);
+    }
+    eprintln!("Warning: skipping {} '{}': {}", kind, name, err);
+}
+
+/// `--db X` naming a configured entry: build only that one (a one-shot command needs nothing else).
+fn only_requested<T>(cfgs: &mut Vec<T>, requested: &Option<String>, name: impl Fn(&T) -> &str) -> bool {
+    let Some(n) = requested.as_deref() else { return false };
+    if !cfgs.iter().any(|c| name(c) == n) {
+        return false;
+    }
+    cfgs.retain(|c| name(c) == n);
+    true
+}
+
+async fn build_pg_databases(
+    path: &PathBuf,
+    requested: &Option<String>,
+) -> HashMap<String, Arc<dyn Database>> {
+    let mut cfgs = load_config(path).database;
+    let strict = only_requested(&mut cfgs, requested, |c| c.name.as_str());
     let mut databases: HashMap<String, Arc<dyn Database>> = HashMap::new();
-    for cfg in config.database {
-        let url = resolve_url(&cfg.name, &cfg.url);
-        databases.insert(cfg.name.clone(), Arc::new(PostgresDb::new(&cfg.name, url, cfg.no_tls)));
+    for cfg in cfgs {
+        match build_pg(&cfg) {
+            Ok(db) => {
+                databases.insert(cfg.name, db);
+            }
+            Err(e) => unresolved("database", &cfg.name, &e, strict),
+        }
     }
     databases
 }
 
-async fn build_mongo_databases(path: &PathBuf) -> HashMap<String, Arc<dyn MongoDatabase>> {
-    let config = load_config(path);
+async fn build_mongo_databases(
+    path: &PathBuf,
+    requested: &Option<String>,
+) -> HashMap<String, Arc<dyn MongoDatabase>> {
+    let mut cfgs = load_config(path).mongo;
+    let strict = only_requested(&mut cfgs, requested, |c| c.name.as_str());
     let mut dbs: HashMap<String, Arc<dyn MongoDatabase>> = HashMap::new();
-    for cfg in config.mongo {
-        let uri = resolve_url(&cfg.name, &cfg.uri);
-        let opts = ClientOptions::parse(&uri).await.unwrap_or_else(|e| {
-            eprintln!("Fatal: mongo '{}' URI parse: {}", cfg.name, e);
-            std::process::exit(1);
-        });
-        let dbname = opts.default_database.unwrap_or_else(|| {
-            eprintln!("Fatal: mongo '{}' URI must include the database name", cfg.name);
-            std::process::exit(1);
-        });
-        dbs.insert(cfg.name.clone(), Arc::new(MongoDb::new(&cfg.name, uri, dbname)));
+    for cfg in cfgs {
+        match build_mongo(&cfg).await {
+            Ok(db) => {
+                dbs.insert(cfg.name, db);
+            }
+            Err(e) => unresolved("mongo", &cfg.name, &e, strict),
+        }
     }
     dbs
 }
@@ -209,13 +255,6 @@ async fn build_mongo_databases(path: &PathBuf) -> HashMap<String, Arc<dyn MongoD
 fn load_config(path: &PathBuf) -> Config {
     Config::from_file(path).unwrap_or_else(|e| {
         eprintln!("Fatal: {}", e);
-        std::process::exit(1);
-    })
-}
-
-fn resolve_url(name: &str, raw: &str) -> String {
-    interpolate_env(raw).unwrap_or_else(|e| {
-        eprintln!("Fatal: database '{}': {}", name, e);
         std::process::exit(1);
     })
 }
@@ -308,22 +347,27 @@ async fn run_serve(args: ServeArgs) {
 
     let mut databases: HashMap<String, Arc<dyn Database>> = HashMap::new();
     for cfg in pg_configs {
-        let url = resolve_url(&cfg.name, &cfg.url);
-        databases.insert(cfg.name.clone(), Arc::new(PostgresDb::new(&cfg.name, url, cfg.no_tls)));
+        match build_pg(&cfg) {
+            Ok(db) => {
+                databases.insert(cfg.name, db);
+            }
+            Err(e) => unresolved("database", &cfg.name, &e, false),
+        }
     }
 
     let mut mongo_databases: HashMap<String, Arc<dyn MongoDatabase>> = HashMap::new();
     for cfg in mongo_configs {
-        let uri = resolve_url(&cfg.name, &cfg.uri);
-        let opts = ClientOptions::parse(&uri).await.unwrap_or_else(|e| {
-            eprintln!("Fatal: mongo '{}' URI parse: {}", cfg.name, e);
-            std::process::exit(1);
-        });
-        let dbname = opts.default_database.unwrap_or_else(|| {
-            eprintln!("Fatal: mongo '{}' URI must include database name", cfg.name);
-            std::process::exit(1);
-        });
-        mongo_databases.insert(cfg.name.clone(), Arc::new(MongoDb::new(&cfg.name, uri, dbname)));
+        match build_mongo(&cfg).await {
+            Ok(db) => {
+                mongo_databases.insert(cfg.name, db);
+            }
+            Err(e) => unresolved("mongo", &cfg.name, &e, false),
+        }
+    }
+
+    if databases.is_empty() && mongo_databases.is_empty() {
+        eprintln!("Fatal: no configured database could be resolved");
+        std::process::exit(1);
     }
 
     server::run(databases, mongo_databases, args.max_rows).await;
@@ -348,7 +392,7 @@ async fn run_query(args: QueryArgs) {
         std::process::exit(1);
     }
 
-    let databases = build_pg_databases(&args.config).await;
+    let databases = build_pg_databases(&args.config, &args.db).await;
     let db = pick_pg(&databases, &args.db);
 
     match db.execute_query(&sql, args.max_rows).await {
@@ -377,7 +421,7 @@ async fn run_mongo(args: MongoArgs) {
         field: args.field,
     };
 
-    let databases = build_mongo_databases(&args.config).await;
+    let databases = build_mongo_databases(&args.config, &args.db).await;
     let db = pick_mongo(&databases, &args.db);
 
     match db.execute_mongo(query).await {
