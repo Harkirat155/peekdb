@@ -404,7 +404,7 @@ pub async fn run() {
             let config_path = resolve_cli_config(a.config.as_deref());
             let audit_path = resolve_audit_log_path(Some(&config_path), &None, false);
             let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
-            let databases = build_pg_databases(&config_path, "repl", &audit).await;
+            let databases = build_pg_databases(&config_path, None, "repl", &audit).await;
             repl::run_repl(databases, a.db, fmt).await;
         }
         Command::Explore(a) => {
@@ -415,7 +415,7 @@ pub async fn run() {
                     .unwrap_or(std::path::Path::new("."))
                     .join("audit.jsonl"),
             )));
-            let databases = build_pg_databases(&config_path, "explore", &audit).await;
+            let databases = build_pg_databases(&config_path, None, "explore", &audit).await;
             explore::run_explore(databases, a.db).await;
         }
         Command::Fav(cmd) => run_fav(cmd),
@@ -652,6 +652,7 @@ fn new_redis_db(cfg: &RedisConfig, url: String, rates: &RateLimitRegistry) -> Re
 
 async fn build_pg_databases(
     path: &Path,
+    selected: Option<&str>,
     source: &'static str,
     audit: &Option<Arc<AuditLog>>,
 ) -> HashMap<String, Arc<dyn Database>> {
@@ -659,7 +660,9 @@ async fn build_pg_databases(
     let rates = RateLimitRegistry::default();
     let mut databases: HashMap<String, Arc<dyn Database>> = HashMap::new();
     for cfg in config.database {
-        let url = resolve_url(&cfg.name, &cfg.url);
+        let Some(url) = resolve_or_skip(&cfg.name, &cfg.url, selected) else {
+            continue;
+        };
         let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url, &rates));
         let db = match audit {
             Some(log) => Arc::new(AuditedDatabase::new(
@@ -677,6 +680,7 @@ async fn build_pg_databases(
 
 async fn build_mongo_databases(
     path: &Path,
+    selected: Option<&str>,
     source: &'static str,
     audit: &Option<Arc<AuditLog>>,
 ) -> HashMap<String, Arc<dyn MongoDatabase>> {
@@ -684,7 +688,9 @@ async fn build_mongo_databases(
     let rates = RateLimitRegistry::default();
     let mut dbs: HashMap<String, Arc<dyn MongoDatabase>> = HashMap::new();
     for cfg in config.mongo {
-        let uri = resolve_url(&cfg.name, &cfg.uri);
+        let Some(uri) = resolve_or_skip(&cfg.name, &cfg.uri, selected) else {
+            continue;
+        };
         let opts = ClientOptions::parse(&uri).await.unwrap_or_else(|e| {
             eprintln!("Fatal: mongo '{}' URI parse: {}", cfg.name, e);
             std::process::exit(1);
@@ -709,6 +715,7 @@ async fn build_mongo_databases(
 
 async fn build_redis_databases(
     path: &Path,
+    selected: Option<&str>,
     source: &'static str,
     audit: &Option<Arc<AuditLog>>,
 ) -> HashMap<String, Arc<dyn RedisDatabase>> {
@@ -716,7 +723,9 @@ async fn build_redis_databases(
     let rates = RateLimitRegistry::default();
     let mut dbs: HashMap<String, Arc<dyn RedisDatabase>> = HashMap::new();
     for cfg in config.redis {
-        let url = resolve_url(&cfg.name, &cfg.url);
+        let Some(url) = resolve_or_skip(&cfg.name, &cfg.url, selected) else {
+            continue;
+        };
         let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url, &rates));
         let db = match audit {
             Some(log) => Arc::new(AuditedRedis::new(db, cfg.name.clone(), source, log.clone()))
@@ -735,11 +744,23 @@ fn load_config(path: &Path) -> Config {
     })
 }
 
-fn resolve_url(name: &str, raw: &str) -> String {
-    interpolate_env(raw).unwrap_or_else(|e| {
-        eprintln!("Fatal: database '{}': {}", name, e);
-        std::process::exit(1);
-    })
+/// Resolve `${VAR}` placeholders for one database entry.
+///
+/// An entry whose env vars are unset is skipped with one stderr warning
+/// (name and variable only, never values). If it is the entry selected with
+/// `--db` (`selected`), that is fatal instead.
+fn resolve_or_skip(name: &str, raw: &str, selected: Option<&str>) -> Option<String> {
+    match interpolate_env(raw) {
+        Ok(v) => Some(v),
+        Err(e) if selected == Some(name) => {
+            eprintln!("Fatal: database '{}': {}", name, e);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Warning: skipping database '{}': {}", name, e);
+            None
+        }
+    }
 }
 
 /// Picks the target Postgres database by name, or the sole configured one if
@@ -981,7 +1002,9 @@ async fn run_serve(args: ServeArgs) {
 
     let mut databases: HashMap<String, Arc<dyn Database>> = HashMap::new();
     for cfg in pg_configs {
-        let url = resolve_url(&cfg.name, &cfg.url);
+        let Some(url) = resolve_or_skip(&cfg.name, &cfg.url, None) else {
+            continue;
+        };
         let db: Arc<dyn Database> = Arc::new(new_postgres_db(&cfg, url, &rates));
         let db = match &audit {
             Some(log) => Arc::new(AuditedDatabase::new(
@@ -997,7 +1020,9 @@ async fn run_serve(args: ServeArgs) {
 
     let mut mongo_databases: HashMap<String, Arc<dyn MongoDatabase>> = HashMap::new();
     for cfg in mongo_configs {
-        let uri = resolve_url(&cfg.name, &cfg.uri);
+        let Some(uri) = resolve_or_skip(&cfg.name, &cfg.uri, None) else {
+            continue;
+        };
         let opts = ClientOptions::parse(&uri).await.unwrap_or_else(|e| {
             eprintln!("Fatal: mongo '{}' URI parse: {}", cfg.name, e);
             std::process::exit(1);
@@ -1017,7 +1042,9 @@ async fn run_serve(args: ServeArgs) {
 
     let mut redis_databases: HashMap<String, Arc<dyn RedisDatabase>> = HashMap::new();
     for cfg in redis_configs {
-        let url = resolve_url(&cfg.name, &cfg.url);
+        let Some(url) = resolve_or_skip(&cfg.name, &cfg.url, None) else {
+            continue;
+        };
         let db: Arc<dyn RedisDatabase> = Arc::new(new_redis_db(&cfg, url, &rates));
         let db = match &audit {
             Some(log) => Arc::new(AuditedRedis::new(db, cfg.name.clone(), "mcp", log.clone()))
@@ -1062,7 +1089,7 @@ async fn run_query(args: QueryArgs) {
     let audit_path = resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
     let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
 
-    let databases = build_pg_databases(&config_path, "cli", &audit).await;
+    let databases = build_pg_databases(&config_path, args.db.as_deref(), "cli", &audit).await;
     let db = pick_pg(&databases, &args.db).unwrap_or_else(|e| {
         eprintln!("{}", e);
         std::process::exit(1);
@@ -1099,7 +1126,7 @@ async fn run_mongo(args: MongoArgs) {
     let audit_path = resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
     let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
 
-    let databases = build_mongo_databases(&config_path, "cli", &audit).await;
+    let databases = build_mongo_databases(&config_path, args.db.as_deref(), "cli", &audit).await;
     let db = pick_mongo(&databases, &args.db).unwrap_or_else(|e| {
         eprintln!("{}", e);
         std::process::exit(1);
@@ -1126,7 +1153,7 @@ async fn run_redis(args: RedisArgs) {
     let audit_path = resolve_audit_log_path(Some(&config_path), &args.audit_log, args.no_audit_log);
     let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
 
-    let databases = build_redis_databases(&config_path, "cli", &audit).await;
+    let databases = build_redis_databases(&config_path, args.db.as_deref(), "cli", &audit).await;
     let db = pick_redis(&databases, &args.db).unwrap_or_else(|e| {
         eprintln!("{}", e);
         std::process::exit(1);
@@ -1138,6 +1165,32 @@ async fn run_redis(args: RedisArgs) {
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    #[test]
+    fn unset_env_is_skipped_not_fatal() {
+        assert_eq!(resolve_or_skip("a", "x://${PEEKDB_T_UNSET_1}", None), None);
+        // A different DB being selected must not make this one fatal.
+        assert_eq!(
+            resolve_or_skip("a", "x://${PEEKDB_T_UNSET_1}", Some("b")),
+            None
+        );
+    }
+
+    #[test]
+    fn set_env_resolves() {
+        std::env::set_var("PEEKDB_T_SET_3", "ok");
+        for sel in [None, Some("a"), Some("b")] {
+            assert_eq!(
+                resolve_or_skip("a", "x://${PEEKDB_T_SET_3}", sel).as_deref(),
+                Some("x://ok")
+            );
         }
     }
 }

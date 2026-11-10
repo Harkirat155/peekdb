@@ -316,7 +316,7 @@ pub fn interpolate_env(s: &str) -> Result<String, String> {
                 var.push(c);
             }
             if !closed {
-                return Err(format!("Unclosed '${{' in value: {}", s));
+                return Err("Unclosed '${' in config value".to_string());
             }
             match std::env::var(&var) {
                 Ok(val) => out.push_str(&val),
