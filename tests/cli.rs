@@ -667,3 +667,24 @@ fn query_empty_sql_fails_with_clear_error() {
         .failure()
         .stderr(predicate::str::contains("No SQL provided"));
 }
+
+#[test]
+fn selected_db_with_unset_env_var_is_fatal_in_repl_and_explore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("peekdb.toml");
+    std::fs::write(
+        &cfg,
+        "[[database]]\nname = \"ok\"\nurl = \"postgres://u@127.0.0.1:1/db\"\nno_tls = true\n\n\
+         [[database]]\nname = \"broken\"\nurl = \"${PEEKDB_TEST_UNSET_VAR}\"\nno_tls = true\n",
+    )
+    .unwrap();
+    for sub in ["repl", "explore"] {
+        bin()
+            .env_remove("PEEKDB_TEST_UNSET_VAR")
+            .env("HOME", tmp.path())
+            .args([sub, "--config", cfg.to_str().unwrap(), "--db", "broken"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("Fatal: database 'broken'"));
+    }
+}

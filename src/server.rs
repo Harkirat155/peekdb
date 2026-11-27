@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, info, warn};
 
 #[derive(Clone, Copy)]
@@ -214,7 +214,16 @@ impl Server {
     }
 }
 
-async fn read_message(reader: &mut BufReader<tokio::io::Stdin>) -> Option<String> {
+/// How a client frames messages; replies use the framing of the request they answer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Framing {
+    /// MCP stdio spec: one JSON message per line
+    Lines,
+    /// LSP-style `Content-Length: N` headers
+    ContentLength,
+}
+
+async fn read_message(reader: &mut (impl AsyncBufRead + Unpin)) -> Option<(String, Framing)> {
     let mut content_length: usize = 0;
 
     loop {
@@ -223,7 +232,13 @@ async fn read_message(reader: &mut BufReader<tokio::io::Stdin>) -> Option<String
             Ok(0) => return None,
             Ok(_) => {
                 let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.trim_start().starts_with('{') {
+                    return Some((trimmed.trim().to_string(), Framing::Lines));
+                }
                 if trimmed.is_empty() {
+                    if content_length == 0 {
+                        continue;
+                    }
                     break;
                 }
                 if let Some(val) = trimmed.strip_prefix("Content-Length: ") {
@@ -243,7 +258,9 @@ async fn read_message(reader: &mut BufReader<tokio::io::Stdin>) -> Option<String
 
     let mut body = vec![0u8; content_length];
     match reader.read_exact(&mut body).await {
-        Ok(_) => String::from_utf8(body).ok(),
+        Ok(_) => String::from_utf8(body)
+            .ok()
+            .map(|b| (b, Framing::ContentLength)),
         Err(e) => {
             error!("stdin body: {}", e);
             None
@@ -251,12 +268,24 @@ async fn read_message(reader: &mut BufReader<tokio::io::Stdin>) -> Option<String
     }
 }
 
-async fn write_message(stdout: &mut tokio::io::Stdout, json: &str) -> std::io::Result<()> {
+async fn write_message(
+    stdout: &mut tokio::io::Stdout,
+    json: &str,
+    framing: Framing,
+) -> std::io::Result<()> {
     let bytes = json.as_bytes();
-    stdout
-        .write_all(format!("Content-Length: {}\r\n\r\n", bytes.len()).as_bytes())
-        .await?;
-    stdout.write_all(bytes).await?;
+    match framing {
+        Framing::Lines => {
+            stdout.write_all(bytes).await?;
+            stdout.write_all(b"\n").await?;
+        }
+        Framing::ContentLength => {
+            stdout
+                .write_all(format!("Content-Length: {}\r\n\r\n", bytes.len()).as_bytes())
+                .await?;
+            stdout.write_all(bytes).await?;
+        }
+    }
     stdout.flush().await
 }
 
@@ -288,8 +317,8 @@ pub async fn run(
     info!("MCP server ready — {}", summary.join(" | "));
 
     loop {
-        let raw = match read_message(&mut reader).await {
-            Some(s) => s,
+        let (raw, framing) = match read_message(&mut reader).await {
+            Some(m) => m,
             None => {
                 info!("stdin closed — shutting down");
                 break;
@@ -310,7 +339,7 @@ pub async fn run(
         if let Some(resp) = response {
             let json = serde_json::to_string(&resp).expect("serialize failed");
             debug!(">>> {}", json);
-            if let Err(e) = write_message(&mut stdout, &json).await {
+            if let Err(e) = write_message(&mut stdout, &json, framing).await {
                 error!("stdout write: {}", e);
                 break;
             }
@@ -1319,4 +1348,39 @@ fn format_result(result: &QueryResult) -> String {
         out.push_str(&format!("{} row(s)\n", result.row_count));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_message, Framing};
+
+    async fn read_all(input: &str) -> Vec<(String, Framing)> {
+        let mut reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        while let Some(m) = read_message(&mut reader).await {
+            out.push(m);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn reads_newline_delimited_messages_and_skips_blank_lines() {
+        let msgs = read_all("{\"a\":1}\n\n  {\"b\":2}\r\n").await;
+        assert_eq!(
+            msgs,
+            vec![
+                ("{\"a\":1}".to_string(), Framing::Lines),
+                ("{\"b\":2}".to_string(), Framing::Lines),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reads_content_length_messages() {
+        let msgs = read_all("Content-Length: 7\r\n\r\n{\"a\":1}").await;
+        assert_eq!(
+            msgs,
+            vec![("{\"a\":1}".to_string(), Framing::ContentLength)]
+        );
+    }
 }
