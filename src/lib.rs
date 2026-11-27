@@ -404,7 +404,7 @@ pub async fn run() {
             let config_path = resolve_cli_config(a.config.as_deref());
             let audit_path = resolve_audit_log_path(Some(&config_path), &None, false);
             let audit: Option<Arc<AuditLog>> = audit_path.map(|p| Arc::new(AuditLog::open(p)));
-            let databases = build_pg_databases(&config_path, None, "repl", &audit).await;
+            let databases = build_pg_databases(&config_path, a.db.as_deref(), "repl", &audit).await;
             repl::run_repl(databases, a.db, fmt).await;
         }
         Command::Explore(a) => {
@@ -415,7 +415,8 @@ pub async fn run() {
                     .unwrap_or(std::path::Path::new("."))
                     .join("audit.jsonl"),
             )));
-            let databases = build_pg_databases(&config_path, None, "explore", &audit).await;
+            let databases =
+                build_pg_databases(&config_path, a.db.as_deref(), "explore", &audit).await;
             explore::run_explore(databases, a.db).await;
         }
         Command::Fav(cmd) => run_fav(cmd),
