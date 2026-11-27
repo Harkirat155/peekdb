@@ -25,7 +25,7 @@ backend, not a single "please be careful" check:
 2. **Pipeline stage blocking** — `$out` and `$merge` stages (Mongo's equivalent of a write) are blocked in every aggregation pipeline before execution.
 
 **Redis:**
-1. **Command allowlist** — Redis has no read-only-transaction concept the way Postgres does, so this is the sole enforcement layer. Only read commands (`GET`/`MGET`, `HGET`/`HGETALL`, `SMEMBERS`, `ZRANGE`, `LRANGE`, the `SCAN` family, `TTL`, `EXISTS`, `KEYS`, etc.) and a few read-only subcommands (`CONFIG GET`, `CLUSTER INFO`) are accepted; everything else — `SET`/`DEL`/`EXPIRE`/`FLUSHALL`, scripting, transactions, pub/sub, `CONFIG SET`, `SHUTDOWN`, and anything not explicitly listed — is rejected by omission.
+1. **Command allowlist** — Redis has no read-only-transaction concept the way Postgres does, so this is the sole enforcement layer. Only read commands (`GET`/`MGET`, `HGET`/`HGETALL`, `SMEMBERS`, `ZRANGE`, `LRANGE`, the `SCAN` family, `TTL`, `EXISTS`, `KEYS`, etc.) and a few read-only subcommands (`CONFIG GET` with named, non-secret parameters only — no globs, nothing password or auth bearing; `CLUSTER INFO`) are accepted; everything else — `SET`/`DEL`/`EXPIRE`/`FLUSHALL`, scripting, transactions, pub/sub, `CONFIG SET`, `SHUTDOWN`, and anything not explicitly listed — is rejected by omission.
 
 No prompt, flag, or client bug can talk `peekdb` into a write. Every call — allowed, blocked,
 or failed — is recorded in an append-only audit log.
