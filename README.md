@@ -20,6 +20,17 @@ backend, not a single "please be careful" check:
 4. **Embedded-write scan** — statements that start with `WITH` are scanned for write keywords *outside* string literals, comments, and quoted identifiers, so data-modifying CTEs (`WITH d AS (DELETE … RETURNING *) SELECT …`) and `WITH … INSERT …` forms are rejected client-side (not only by the RO transaction).
 5. **Single-statement enforcement** — interior `;` chains are rejected, preventing `SET …; INSERT …` patterns.
 
+**Use a least-privilege role.** These layers stop writes, not reads of the database server's own files: a superuser, or a role in `pg_read_server_files`, can still run `SELECT pg_read_file('/etc/passwd')`. Connect with a dedicated role that is neither, granted only `SELECT` on what agents need:
+
+```sql
+CREATE ROLE peekdb_reader LOGIN PASSWORD '…';
+GRANT CONNECT ON DATABASE app TO peekdb_reader;
+GRANT USAGE ON SCHEMA public TO peekdb_reader;
+GRANT SELECT ON users, orders TO peekdb_reader;
+```
+
+peekdb warns at connect and in `peekdb doctor` when the role is a superuser or in `pg_read_server_files`. It does not detect a direct `GRANT EXECUTE` on `pg_read_file`, so keep that off the role too.
+
 **MongoDB:**
 1. **Operation allowlist** — only `find`, `aggregate`, `distinct`, `count`, `list_collections`, and `list_indexes` are accepted.
 2. **Pipeline stage blocking** — `$out` and `$merge` stages (Mongo's equivalent of a write) are blocked in every aggregation pipeline before execution.

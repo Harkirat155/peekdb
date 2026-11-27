@@ -314,7 +314,18 @@ pub async fn run_doctor(args: DoctorArgs) {
                     None => client,
                 };
                 match client.execute_query("SELECT 1", 1).await {
-                    Ok(_) => print_status(&label, true, "SELECT 1 ok"),
+                    Ok(_) => {
+                        print_status(&label, true, "SELECT 1 ok");
+                        // Surface a role that can read server files as a WARN line, not
+                        // failures: doctor's exit code is unchanged by them.
+                        match client.role_warning_for_connection().await {
+                            Ok(Some(line)) => print_warn(&label, &line),
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::debug!("role warning check skipped: {e}");
+                            }
+                        }
+                    }
                     Err(e) => {
                         print_status(&label, false, &e.to_string());
                         failures += 1;
@@ -416,6 +427,10 @@ pub async fn run_doctor(args: DoctorArgs) {
 fn print_status(label: &str, ok: bool, detail: &str) {
     let mark = if ok { "ok  " } else { "FAIL" };
     println!("{mark}  {label}  —  {detail}");
+}
+
+fn print_warn(label: &str, detail: &str) {
+    println!("warn  {label}  —  {detail}");
 }
 
 fn json_escape(s: &str) -> String {
