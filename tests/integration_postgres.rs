@@ -337,3 +337,17 @@ async fn empty_statement_is_rejected() {
     let result = d.execute_query("   ", 500).await;
     assert!(matches!(result, Err(DbError::QueryFailed(_))));
 }
+
+#[tokio::test]
+#[ignore]
+async fn superuser_test_role_yields_server_file_warning() {
+    // The Docker test role (POSTGRES_USER) is a superuser, so the
+    // connect-time check must flag it. Exercises `role_warning_for_connection`
+    // (the same check `doctor` prints) rather than scraping log output.
+    let d = db();
+    let warning = d.role_warning_for_connection().await.unwrap();
+    assert!(
+        warning.as_deref().is_some_and(|w| w.contains("superuser")),
+        "expected a superuser warning, got {warning:?}"
+    );
+}

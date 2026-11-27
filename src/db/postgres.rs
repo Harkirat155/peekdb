@@ -88,6 +88,41 @@ const EXPLAIN_MODIFIER_WORDS: &[&str] = &[
 /// subject to (and shouldn't be confused with) the `check_allowed` allowlist.
 const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 30_000;
 
+/// A plain-English warning for the role power peekdb's read-only layers do
+/// NOT stop: the statement allowlist and READ ONLY transaction block writes,
+/// but a superuser or a member of `pg_read_server_files` can still read any
+/// file on the database server from a SELECT (`pg_read_file(...)`).
+pub fn role_warning(superuser: bool, read_server_files: bool) -> Option<String> {
+    if superuser {
+        Some("role is a superuser: a SELECT can read any file on the database server (pg_read_file); connect with a non-superuser read-only role".to_string())
+    } else if read_server_files {
+        Some("role is in pg_read_server_files: a SELECT can read any file on the database server (pg_read_file); revoke it or connect with a dedicated read-only role".to_string())
+    } else {
+        None
+    }
+}
+
+/// Query whether the current role can read server files. Returns `None` when
+/// the check itself cannot run (old server, restricted catalog) — callers log
+/// and continue; this check must never fail a connection.
+async fn fetch_role_flags(client: &tokio_postgres::Client) -> Option<(bool, bool)> {
+    let messages = client
+        .simple_query(
+            // By OID, so a server without the predefined role (PG 10 and older) reads
+            // false instead of failing the whole query and losing the superuser flag.
+            "SELECT rolsuper, COALESCE((SELECT pg_has_role(current_user, oid, 'USAGE') FROM pg_roles WHERE rolname = 'pg_read_server_files'), false) FROM pg_roles WHERE rolname = current_user",
+        )
+        .await
+        .ok()?;
+    for message in &messages {
+        if let SimpleQueryMessage::Row(row) = message {
+            let flag = |i: usize| row.get(i).is_some_and(|v| v == "t");
+            return Some((flag(0), flag(1)));
+        }
+    }
+    None
+}
+
 pub struct PostgresDb {
     name: String,
     url: String,
@@ -129,6 +164,29 @@ impl PostgresDb {
 
     pub fn allowlist(&self) -> &crate::policy::ObjectAllowlist {
         &self.policy.allow_objects
+    }
+
+    /// Re-run the connect-time server-file check on the live connection and
+    /// return the warning, if any, so `doctor` can print it. A check that
+    /// cannot run surfaces as `Err` for the caller to log and ignore; it never
+    /// fails a connection on its own.
+    pub async fn role_warning_for_connection(&self) -> Result<Option<String>, DbError> {
+        let mut guard = self.client.lock().await;
+        Self::ensure_connected(
+            &mut guard,
+            &self.name,
+            &self.url,
+            self.no_tls,
+            self.statement_timeout_ms,
+        )
+        .await?;
+        let client = guard.as_ref().expect("connected after ensure_connected");
+        match fetch_role_flags(client).await {
+            Some((superuser, read_files)) => Ok(role_warning(superuser, read_files)),
+            None => Err(DbError::QueryFailed(
+                "role privilege check could not run (query failed or no row)".into(),
+            )),
+        }
     }
 
     async fn ensure_connected(
@@ -174,6 +232,21 @@ impl PostgresDb {
                     name, e
                 ))
             })?;
+
+        // Read-only layers stop writes, not reads of the server's filesystem:
+        // flag a role that can read server files. A failed check
+        // (old server, restricted catalog) never fails the connection.
+        match fetch_role_flags(&client).await {
+            Some((superuser, read_files)) => {
+                if let Some(line) = role_warning(superuser, read_files) {
+                    warn!("'{}': {}", name, line);
+                }
+            }
+            None => debug!(
+                "'{}': could not check whether the role can read server files; skipping warning",
+                name
+            ),
+        }
 
         info!(
             "'{}' connected (READ ONLY, statement_timeout={}ms).",
@@ -789,6 +862,15 @@ mod tests {
             matches!(err, DbError::ConnectionFailed(_) | DbError::QueryFailed(_)),
             "expected connection/query failure after allowlist pass, got {err:?}"
         );
+    }
+
+    #[test]
+    fn role_warning_only_for_roles_that_can_read_server_files() {
+        assert_eq!(role_warning(false, false), None);
+        assert!(role_warning(true, true).unwrap().contains("superuser"));
+        assert!(role_warning(false, true)
+            .unwrap()
+            .contains("pg_read_server_files"));
     }
 
     #[test]

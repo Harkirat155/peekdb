@@ -83,6 +83,38 @@ const ALLOWED_SUBCOMMANDS: &[(&str, &[&str])] = &[
     ("CLUSTER", &["INFO", "NODES", "SLOTS", "SHARDS"]),
 ];
 
+/// Rejects `CONFIG GET` when no parameter is given, any parameter contains a glob
+/// metacharacter (`*`, `?`, `[`, `\`), or any parameter (case-insensitively) names a
+/// secret-bearing key: secrets live in `requirepass`, `masterauth`/`primaryauth`,
+/// `masteruser`/`primaryuser`, `tls-*-pass`, `sentinel-pass` and the like, and a glob
+/// can pull them all. This is a denylist, so it errs wide (`secret`, `token`).
+fn check_config_get_params(params: &[String]) -> Result<(), DbError> {
+    const GLOB_METACHARS: &[char] = &['*', '?', '[', '\\'];
+    const BLOCKED_SUBSTRINGS: &[&str] = &["pass", "auth", "user", "secret", "token"];
+    const BLOCKED_EXACT: &[&str] = &["aclfile"];
+
+    let is_bad = |p: &str| {
+        if p.contains(GLOB_METACHARS) {
+            return true;
+        }
+        let lower = p.to_lowercase();
+        BLOCKED_SUBSTRINGS.iter().any(|s| lower.contains(s))
+            || BLOCKED_EXACT.iter().any(|s| lower == *s)
+    };
+
+    if params.is_empty() {
+        return Err(DbError::BlockedKeyword {
+            keyword: "CONFIG GET (no parameter)".to_string(),
+        });
+    }
+    if let Some(bad) = params.iter().find(|p| is_bad(p)) {
+        return Err(DbError::BlockedKeyword {
+            keyword: format!("CONFIG GET {bad}"),
+        });
+    }
+    Ok(())
+}
+
 fn check_allowed_redis(command: &str, args: &[String]) -> Result<(), DbError> {
     let upper = command.to_uppercase();
 
@@ -93,6 +125,9 @@ fn check_allowed_redis(command: &str, args: &[String]) -> Result<(), DbError> {
     if let Some((_, subs)) = ALLOWED_SUBCOMMANDS.iter().find(|(c, _)| *c == upper) {
         let sub = args.first().map(|s| s.to_uppercase()).unwrap_or_default();
         if subs.contains(&sub.as_str()) {
+            if upper == "CONFIG" && sub == "GET" {
+                check_config_get_params(&args[1..])?;
+            }
             return Ok(());
         }
         return Err(DbError::BlockedKeyword {
@@ -454,10 +489,42 @@ mod tests {
     #[test]
     fn config_get_is_allowed_but_config_set_is_blocked() {
         assert!(check_allowed_redis("CONFIG", &a(&["GET", "maxmemory"])).is_ok());
+        assert!(
+            check_allowed_redis("CONFIG", &a(&["GET", "maxmemory", "maxmemory-policy"])).is_ok()
+        );
         assert!(matches!(
             check_allowed_redis("CONFIG", &a(&["SET", "maxmemory", "100mb"])),
             Err(DbError::BlockedKeyword { .. })
         ));
+    }
+
+    #[test]
+    fn config_get_secret_and_glob_parameters_are_blocked() {
+        for args in [
+            &["GET", "requirepass"][..],
+            &["GET", "REQUIREPASS"],
+            &["GET", "masterauth"],
+            &["GET", "*"],
+            &["GET", "*pass*"],
+            &["GET", "maxmemory", "requirepass"],
+            &["GET", "masteruser"],
+            &["GET", "primaryuser"],
+            &["GET", "primaryauth"],
+            &["GET", "tls-key-file-pass"],
+            &["GET", "maxmemor?"],
+            &["GET", "[m]axmemory"],
+            &["GET", "max\\memory"],
+            &["GET", "aclfile"],
+            &["GET"],
+        ] {
+            assert!(
+                matches!(
+                    check_allowed_redis("CONFIG", &a(args)),
+                    Err(DbError::BlockedKeyword { .. })
+                ),
+                "CONFIG {args:?} should be blocked"
+            );
+        }
     }
 
     #[test]
