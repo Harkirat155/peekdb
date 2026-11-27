@@ -48,6 +48,9 @@ or failed — is recorded in an append-only audit log.
 Download a tarball/zip for your platform from [GitHub Releases](https://github.com/Harkirat155/peekdb/releases)
 — Linux, macOS, and Windows, x86_64 and aarch64.
 
+With [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), `cargo binstall peekdb` fetches the same
+binary instead of compiling. This works for releases after v0.2.0; v0.2.0 on crates.io predates the metadata.
+
 ### From source
 
 ```bash
