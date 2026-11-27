@@ -48,3 +48,16 @@ predicates = "3"
 [features]
 default = ["tls"]
 tls = ["dep:postgres-native-tls", "dep:native-tls", "redis/tokio-native-tls-comp"]
+
+# cargo-binstall: install the prebuilt release binary instead of compiling.
+# Matches the asset names and layout that .github/workflows/release.yml uploads.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-fmt = "zip"
