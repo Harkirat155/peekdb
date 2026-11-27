@@ -91,10 +91,34 @@ impl AuditLog {
             let rotated = self.path.with_extension(format!("jsonl.{}", state.day));
             let _ = std::fs::rename(&self.path, rotated);
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&self.path)?;
+        // Tighten a log an older peekdb created with the umask. On the open handle, so a
+        // file swapped in by path is not the one changed; regular files only, so a path
+        // pointed at a device is left alone.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tighten = file
+                .metadata()
+                .map(|m| m.is_file() && m.permissions().mode() & 0o077 != 0)
+                .unwrap_or(false);
+            if tighten {
+                if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+                    tracing::warn!(
+                        "audit log: could not tighten permissions on {}: {}",
+                        self.path.display(),
+                        e
+                    );
+                }
+            }
+        }
         state.file = Some(file);
         state.day = today.to_string();
         Ok(())
@@ -374,5 +398,32 @@ mod tests {
     fn write_to_an_unwritable_path_does_not_panic() {
         let log = AuditLog::open("/nonexistent-dir-xyz/audit.jsonl");
         log.write(&event("2026-01-01T00:00:00Z")); // must not panic
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_log_file_has_owner_only_mode() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let log = AuditLog::open(&path);
+        log.write(&event("2026-01-01T00:00:00Z"));
+        let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_created_world_readable_log_is_tightened_to_owner_only() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let log = AuditLog::open(&path);
+        log.write(&event("2026-01-01T00:00:00Z"));
+        let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
     }
 }
